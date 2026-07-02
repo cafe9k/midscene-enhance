@@ -1,0 +1,7 @@
+# Ignore all Claude Code local config by default
+*
+
+# Except the project-shared midscene-report-compare skill
+!skills/
+!skills/midscene-report-compare/
+!skills/midscene-report-compare/SKILL.md

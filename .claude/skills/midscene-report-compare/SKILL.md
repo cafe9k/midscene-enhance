@@ -17,41 +17,69 @@ Compare a successful and a failed Midscene split report to identify planning dri
 
 ## Required Input
 
-Two split-report directories. Each must contain:
+Prefer one compare directory that contains one successful run and one failed run:
+
+```
+<compare-dir>/
+  ├── success/
+  │   ├── success.json | <N>.execution.json
+  │   └── screenshots/
+  └── fail/ | failure/
+      ├── fail.json | failure.json | <N>.execution.json
+      └── screenshots/
+```
+
+Also accept two explicit split-report directories. Each should contain:
 
 ```
 <report-dir>/
-  ├── <N>.execution.json
+  ├── <N>.execution.json | success.json | fail.json | failure.json
   └── screenshots/
 ```
 
-The user should provide:
+The user may provide either:
 
-1. `successDir` — path to the successful run's split report directory
-2. `failureDir` — path to the failed run's split report directory
+1. `compareDir` — a directory containing success/fail subdirectories
+2. `successDir` and `failureDir` — explicit successful and failed report directories
+3. Two report JSON files — infer each report directory from the JSON file parent
 
-If the user only gives report paths, infer the split directory by looking for the sibling `split/` folder or the directory containing `*.execution.json` and `screenshots/`.
+If the user only gives a parent compare directory, recursively search up to a small depth for directories that contain one report JSON file and a sibling `screenshots/` directory. Infer success/failure labels from directory or file names (`success`, `pass`, `ok`, `成功`; `fail`, `failure`, `failed`, `error`, `失败`). If labels are ambiguous, summarize the candidates and ask the user which is success/failure.
+
+If the user only gives report paths, infer the split directory by looking for the parent directory containing the report JSON and `screenshots/`, or for a sibling `split/` folder.
 
 ## Workflow
 
 ### 1. Locate and validate inputs
 
-- Verify both directories exist
-- Find `*.execution.json` in each
-- Verify `screenshots/` subdir exists
+- Resolve input shape: `compareDir`, explicit directories, or explicit JSON files
+- Find exactly one success report and one failure report when possible
+- In each report directory, find the report JSON in this priority:
+  1. `*.execution.json`
+  2. `success.json`, `fail.json`, `failure.json`
+  3. any single `*.json` that has Midscene report keys such as `executions`, `tasks`, `sdkVersion`
+- Verify `screenshots/` subdir exists next to each report JSON
+- Verify every referenced screenshot path in `uiContext.screenshot` and `recorder[].screenshot` exists under that report directory. If references are missing, search sibling report directories and flag possible swapped/misaligned JSON and screenshot folders before analyzing visual evidence.
+- Do not trust folder names alone. Treat `success/` and `fail/` as labels, but verify them against task outcome, error/running status, and screenshot-reference consistency.
 - Note the file paths for later
 
 ### 2. Read and summarize each report
 
-For each `execution.json`, extract:
+For each report JSON, support both split execution JSON and full report dump JSON. If the top-level has `executions`, select the relevant execution, usually `executions[0]` unless multiple executions are present and the user named one.
+
+Extract:
 
 - Execution `name` and `id`
 - Number of `Planning/Plan` tasks (planning loops)
 - Total tasks, failed tasks, cancelled tasks
-- List of `Action Space` tasks with `subType`
+- Ordered task sequence: `type`, `subType`, `status`, `param`, `thought`, selected `response`, selected `result`
+- List of `Action Space` tasks with `subType` and key params (`uri`, `value`, `locate.description`, bbox/center)
 - `hitBy.from` values (`Plan`, `Cache`, etc.)
 - Any `errorMessage` fields
 - Key screenshots (`uiContext.screenshot`) for each Planning and Action Space task
+
+When comparing `Locate` and input/tap tasks, always extract both logical bbox (`param.bbox`) and pixel bbox/center (`param.locatedPixelBbox`, `param.locate.center`) because visual coordinate mismatch is a common root cause.
+
+When a report JSON references screenshots that are not present next to the JSON, include a "Data Integrity" note in the output. Visual conclusions should be marked lower-confidence until the screenshot directory alignment is fixed.
 
 ### 3. Build the comparison prompt
 

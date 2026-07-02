@@ -77,6 +77,7 @@ summary: "yaml-summary.json"
       expect(result).toEqual({
         concurrent: 3,
         continueOnError: true,
+        retry: 0,
         headed: true,
         keepWindow: true,
         dotenvOverride: true,
@@ -87,6 +88,7 @@ summary: "yaml-summary.json"
         patterns: ['*.yml'],
         shareBrowserContext: false,
         files: ['file1.yml'],
+        setup: undefined,
       });
     });
 
@@ -103,11 +105,26 @@ summary: "yaml-summary.json"
 
       expect(result.concurrent).toBe(1);
       expect(result.continueOnError).toBe(false);
+      expect(result.retry).toBe(0);
       expect(result.headed).toBe(false);
       expect(result.keepWindow).toBe(false);
       expect(result.dotenvOverride).toBe(false);
       expect(result.dotenvDebug).toBe(false);
       expect(result.summary).toMatch(/index-\d+\.json$/);
+    });
+
+    test('should parse the retry option from the config YAML', async () => {
+      const mockYamlContent = `files: ["*.yml"]\nretry: 2`;
+      const mockParsedYaml = { files: ['*.yml'], retry: 2 };
+
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(interpolateEnvVars).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles).mockResolvedValue(['test.yml']);
+
+      const result = await parseConfigYaml(mockIndexPath);
+
+      expect(result.retry).toBe(2);
     });
 
     test('should throw an error if "files" is not an array', async () => {
@@ -132,6 +149,91 @@ summary: "yaml-summary.json"
 
       await expect(parseConfigYaml(mockIndexPath)).rejects.toThrow(
         'No YAML files found matching the patterns in "files"',
+      );
+    });
+
+    test('should resolve the setup file ahead of the main files', async () => {
+      const mockYamlContent = `
+setup: "login.yml"
+files:
+  - "*.yml"
+`;
+      const mockParsedYaml = {
+        setup: 'login.yml',
+        files: ['*.yml'],
+      };
+
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(interpolateEnvVars).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      // First call expands `files`, second call resolves `setup`
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml'])
+        .mockResolvedValueOnce(['login.yml']);
+
+      const result = await parseConfigYaml(mockIndexPath);
+
+      expect(result.files).toEqual(['search.yml']);
+      expect(result.setup).toBe('login.yml');
+    });
+
+    test('should leave setup undefined when absent', async () => {
+      const mockYamlContent = `files: ["*.yml"]`;
+      const mockParsedYaml = { files: ['*.yml'] };
+
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(interpolateEnvVars).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles).mockResolvedValue(['test.yml']);
+
+      const result = await parseConfigYaml(mockIndexPath);
+
+      expect(result.setup).toBeUndefined();
+    });
+
+    test('should throw when the setup pattern matches nothing', async () => {
+      const mockYamlContent = `
+setup: "login.yml"
+files:
+  - "*.yml"
+`;
+      const mockParsedYaml = {
+        setup: 'login.yml',
+        files: ['*.yml'],
+      };
+
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(interpolateEnvVars).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce([]); // setup matches nothing
+
+      await expect(parseConfigYaml(mockIndexPath)).rejects.toThrow(
+        'No YAML file found matching "setup"',
+      );
+    });
+
+    test('should throw when the setup pattern matches multiple files', async () => {
+      const mockYamlContent = `
+setup: "setup-*.yml"
+files:
+  - "*.yml"
+`;
+      const mockParsedYaml = {
+        setup: 'setup-*.yml',
+        files: ['*.yml'],
+      };
+
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(interpolateEnvVars).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce(['setup-a.yml', 'setup-b.yml']); // setup matches >1
+
+      await expect(parseConfigYaml(mockIndexPath)).rejects.toThrow(
+        'must reference a single YAML file',
       );
     });
 
@@ -256,6 +358,52 @@ concurrent: 2
       expect(result.globalConfig).toEqual(expectedGlobalConfig);
     });
 
+    test('should keep setup when shareBrowserContext is enabled', async () => {
+      const mockYamlContent = `
+setup: login.yml
+files:
+  - search.yml
+shareBrowserContext: true
+`;
+      const mockParsedYaml = {
+        setup: 'login.yml',
+        files: ['search.yml'],
+        shareBrowserContext: true,
+      };
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce(['login.yml']); // setup
+
+      const result = await createConfig('/test/index.yml');
+
+      expect(result.shareBrowserContext).toBe(true);
+      expect(result.setup).toBe('login.yml');
+      expect(result.files).toEqual(['search.yml']);
+    });
+
+    test('should reject setup without shareBrowserContext', async () => {
+      const mockYamlContent = `
+setup: login.yml
+files:
+  - search.yml
+`;
+      const mockParsedYaml = {
+        setup: 'login.yml',
+        files: ['search.yml'],
+      };
+      vi.mocked(readFileSync).mockReturnValue(mockYamlContent);
+      vi.mocked(yamlLoad).mockReturnValue(mockParsedYaml);
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce(['login.yml']); // setup
+
+      await expect(createConfig('/test/index.yml')).rejects.toThrow(
+        'setup requires shareBrowserContext: true',
+      );
+    });
+
     test('should override config files with command-line files parameter', async () => {
       const mockYamlContent = `
 files:
@@ -347,8 +495,10 @@ concurrent: 2
       // This is expected behavior - patterns are evaluated independently
       expect(result).toEqual({
         files: ['test1.yml', 'test1.yml', 'testA.yml', 'testB.yml'],
+        setup: undefined,
         concurrent: 1,
         continueOnError: false,
+        retry: 0,
         shareBrowserContext: false,
         summary: expect.stringMatching(/summary-\d+\.json$/),
         headed: false,
@@ -367,6 +517,41 @@ concurrent: 2
       expect(matchYamlFiles).toHaveBeenCalledWith(patterns[1], {
         cwd: process.cwd(),
       });
+    });
+
+    test('should resolve setup when shareBrowserContext is enabled', async () => {
+      const patterns = ['search.yml'];
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce(['login.yml']); // setup
+
+      const result = await createFilesConfig(patterns, {
+        shareBrowserContext: true,
+        setup: 'login.yml',
+      });
+
+      expect(result.setup).toBe('login.yml');
+      expect(result.files).toEqual(['search.yml']);
+    });
+
+    test('should reject setup without shareBrowserContext', async () => {
+      const patterns = ['search.yml'];
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['search.yml']) // files
+        .mockResolvedValueOnce(['login.yml']); // setup
+
+      await expect(
+        createFilesConfig(patterns, { setup: 'login.yml' }),
+      ).rejects.toThrow('setup requires shareBrowserContext: true');
+    });
+
+    test('should forward the retry option through createFilesConfig', async () => {
+      const patterns = ['*.yml'];
+      vi.mocked(matchYamlFiles).mockResolvedValue(['file1.yml']);
+
+      const result = await createFilesConfig(patterns, { retry: 3 });
+
+      expect(result.retry).toBe(3);
     });
 
     test('should create config with all custom options and expand patterns', async () => {
@@ -390,8 +575,10 @@ concurrent: 2
 
       expect(result).toEqual({
         files: expandedFiles,
+        setup: undefined,
         concurrent: 3,
         continueOnError: true,
+        retry: 0,
         summary: 'custom.json',
         shareBrowserContext: true,
         headed: true,
@@ -405,6 +592,67 @@ concurrent: 2
       });
       expect(matchYamlFiles).toHaveBeenCalledWith(patterns[0], {
         cwd: process.cwd(),
+      });
+    });
+
+    test('should create config for the documented YAML runner config-file example', async () => {
+      const patterns = [
+        './scripts/search-iphone.yaml',
+        './scripts/search-laptop.yaml',
+        './scripts/search-headphones.yaml',
+        './scripts/search-camera.yaml',
+      ];
+      vi.mocked(matchYamlFiles)
+        .mockResolvedValueOnce(['./scripts/search-iphone.yaml'])
+        .mockResolvedValueOnce(['./scripts/search-laptop.yaml'])
+        .mockResolvedValueOnce(['./scripts/search-headphones.yaml'])
+        .mockResolvedValueOnce(['./scripts/search-camera.yaml']);
+
+      const result = await createFilesConfig(patterns, {
+        concurrent: 4,
+        continueOnError: true,
+        shareBrowserContext: true,
+        summary: 'doc-summary.json',
+        web: {
+          userAgent: 'Doc Agent',
+          viewportWidth: 1440,
+          viewportHeight: 900,
+        },
+        android: {
+          deviceId: 'android-doc-device',
+        },
+        ios: {
+          wdaPort: 8100,
+          wdaHost: '127.0.0.1',
+        },
+      });
+
+      expect(result).toEqual({
+        files: patterns,
+        setup: undefined,
+        concurrent: 4,
+        continueOnError: true,
+        retry: 0,
+        shareBrowserContext: true,
+        summary: 'doc-summary.json',
+        headed: false,
+        keepWindow: false,
+        dotenvOverride: false,
+        dotenvDebug: false,
+        globalConfig: {
+          web: {
+            userAgent: 'Doc Agent',
+            viewportWidth: 1440,
+            viewportHeight: 900,
+          },
+          android: {
+            deviceId: 'android-doc-device',
+          },
+          ios: {
+            wdaPort: 8100,
+            wdaHost: '127.0.0.1',
+          },
+        },
       });
     });
   });

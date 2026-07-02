@@ -5,7 +5,8 @@ import type {
 } from '@midscene/core';
 import { ReportActionDump, runConnectivityTest } from '@midscene/core';
 import {
-  globalModelConfigManager,
+  ModelConfigManager,
+  type TModelConfig,
   overrideAIConfig,
 } from '@midscene/shared/env';
 import { uuid } from '@midscene/shared/utils';
@@ -133,11 +134,14 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
     console.log('Config updated. Agent will be recreated on next execution.');
   }
 
-  async runConnectivityTest(): Promise<ConnectivityTestResult> {
+  async runConnectivityTest(
+    aiConfig: TModelConfig,
+  ): Promise<ConnectivityTestResult> {
+    const modelConfigManager = new ModelConfigManager(aiConfig);
     return runConnectivityTest({
-      defaultModelConfig: globalModelConfigManager.getModelConfig('default'),
-      planningModelConfig: globalModelConfigManager.getModelConfig('planning'),
-      insightModelConfig: globalModelConfigManager.getModelConfig('insight'),
+      defaultModelConfig: modelConfigManager.getModelConfig('default'),
+      planningModelConfig: modelConfigManager.getModelConfig('planning'),
+      insightModelConfig: modelConfigManager.getModelConfig('insight'),
     });
   }
 
@@ -257,7 +261,7 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
           if (dumpString) {
             const groupedDump =
               ReportActionDump.fromSerializedString(dumpString);
-            response.dump = groupedDump.executions?.[0] || null;
+            response.dump = groupedDump;
           }
         }
       } catch (error: unknown) {
@@ -319,7 +323,7 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
   async cancelTask(_requestId: string): Promise<{
     error?: string;
     success?: boolean;
-    dump?: ExecutionDump | null;
+    dump?: ExecutionDump | ReportActionDump | null;
     reportHTML?: string | null;
   }> {
     if (!this.agent) {
@@ -327,7 +331,7 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
     }
 
     // Get execution data BEFORE destroying the agent
-    let dump: ExecutionDump | null = null;
+    let dump: ExecutionDump | ReportActionDump | null = null;
     let reportHTML: string | null = null;
 
     // Get dump data separately - don't let reportHTML errors affect dump retrieval
@@ -336,10 +340,8 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
       if (typeof this.agent.dumpDataString === 'function') {
         const dumpString = this.agent.dumpDataString();
         if (dumpString) {
-          // dumpDataString() returns ReportActionDump: { executions: ExecutionDump[] }
-          // In Playground, each "Run" creates one execution, so we take executions[0]
           const groupedDump = ReportActionDump.fromSerializedString(dumpString);
-          dump = groupedDump.executions?.[0] ?? null;
+          dump = groupedDump;
         }
       }
     } catch (error) {
@@ -389,11 +391,11 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
    * This allows retrieving dump and report when execution is stopped
    */
   async getCurrentExecutionData(): Promise<{
-    dump: ExecutionDump | null;
+    dump: ExecutionDump | ReportActionDump | null;
     reportHTML: string | null;
   }> {
     const response = {
-      dump: null as ExecutionDump | null,
+      dump: null as ExecutionDump | ReportActionDump | null,
       reportHTML: null as string | null,
     };
 
@@ -403,7 +405,7 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
         const dumpString = this.agent.dumpDataString();
         if (dumpString) {
           const groupedDump = ReportActionDump.fromSerializedString(dumpString);
-          response.dump = groupedDump.executions?.[0] || null;
+          response.dump = groupedDump;
         }
       }
 
@@ -422,6 +424,8 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
   async getInterfaceInfo(): Promise<{
     type: string;
     description?: string;
+    size?: { width: number; height: number };
+    actionTypes?: string[];
   } | null> {
     if (!this.agent?.interface) {
       return null;
@@ -430,10 +434,23 @@ export class LocalExecutionAdapter extends BasePlaygroundAdapter {
     try {
       const type = this.agent.interface.interfaceType || 'Unknown';
       const description = this.agent.interface.describe?.() || undefined;
+      const size =
+        typeof this.agent.interface.size === 'function'
+          ? await this.agent.interface.size()
+          : undefined;
+      const actionTypes =
+        typeof this.agent.interface.actionSpace === 'function'
+          ? this.agent.interface
+              .actionSpace()
+              .map((action) => action?.name)
+              .filter((name): name is string => typeof name === 'string')
+          : undefined;
 
       return {
         type,
         description,
+        ...(size ? { size } : {}),
+        ...(actionTypes ? { actionTypes } : {}),
       };
     } catch (error: unknown) {
       console.error('Failed to get interface info:', error);

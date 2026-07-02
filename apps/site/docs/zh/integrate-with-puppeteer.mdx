@@ -21,13 +21,14 @@ import { PackageManagerTabs } from '@theme';
 
 ### 第一步：安装依赖
 
-<PackageManagerTabs command="install @midscene/web puppeteer tsx --save-dev" />
+<PackageManagerTabs command="install @midscene/web puppeteer tsx dotenv --save-dev" />
 
 ### 第二步：编写脚本
 
 编写下方代码，保存为 `./demo.ts`
 
 ```typescript title="./demo.ts"
+import 'dotenv/config'; // 通过 dotenv/config 自动加载 .env 文件中的环境变量
 import puppeteer from "puppeteer";
 import { PuppeteerAgent } from "@midscene/web/puppeteer";
 
@@ -112,6 +113,12 @@ const mid = new PuppeteerAgent(page, {
   forceSameTabNavigation: false,
 });
 ```
+
+### 浏览器支持说明
+
+Midscene 的部分 Web 自动化能力依赖 Chromium-based browser 提供的 Chrome DevTools Protocol（CDP），例如浏览器级事件、触摸手势，以及一些交互操作中使用的 CDP fallback 路径。
+
+使用 Puppeteer 时，推荐使用 Chrome、Chromium 或其他 Chromium-based browser。不提供兼容 CDP 能力的浏览器，可能会在 Midscene 使用 CDP-backed features 时报错。
 
 ### 连接远程 Puppeteer 浏览器并接入 Midscene Agent
 
@@ -202,6 +209,25 @@ await agent.aiAct('点击红色按钮五次');
 更多关于自定义动作的细节，请参考 [集成到任意界面](./integrate-with-any-interface)。
 
 ## FAQ
+
+### 安装 Puppeteer 很慢，或安装时卡住
+
+Puppeteer 会在安装时通过 `postinstall` 自动下载浏览器镜像。下载慢或网络不通时，安装过程就会卡住。
+
+```bash
+# 先跳过浏览器下载，让依赖安装完成
+PUPPETEER_SKIP_DOWNLOAD=true npm install
+
+# 再单独从镜像站下载 Chrome
+# 下面以 https://registry.npmmirror.com 为例，不同镜像平台的 base-url 规则可能不同
+npx puppeteer browsers install chrome --base-url="https://registry.npmmirror.com/-/binary/chrome-for-testing"
+```
+
+### 下拉框点击不到
+
+如果点击下拉框后，报告中的截图没有出现下拉选项，通常是页面使用了原生 `select` 标签，导致展开后的下拉面板由操作系统原生控件渲染，没有真正出现在浏览器页面里。
+
+Midscene 默认开启 `forceChromeSelectRendering` 选项，强制由 Chrome 来渲染下拉框；如需关闭可将其设为 `false`。详细原因、判断方式和效果说明，请参考 [Playwright FAQ — 下拉框点击不到](./integrate-with-playwright#下拉框点击不到)。
 
 ### 浏览器界面持续闪动
 

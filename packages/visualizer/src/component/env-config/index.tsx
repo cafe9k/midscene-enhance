@@ -1,9 +1,10 @@
 import { SettingOutlined } from '@ant-design/icons';
 import type { ConnectivityTestResult } from '@midscene/core';
-import { Alert, Button, Input, Modal, Tooltip, message } from 'antd';
+import { Alert, App as AntdApp, Button, Input, Modal, Tooltip } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import { useEnvConfig } from '../../store/store';
+import { parseConfig, useEnvConfig } from '../../store/store';
 import type { PlaygroundSDKLike } from '../../types';
+import { notifyError } from '../../utils';
 
 export function EnvConfig({
   showTooltipWhenEmpty = true,
@@ -18,6 +19,7 @@ export function EnvConfig({
   mode?: 'icon' | 'text';
   playgroundSDK?: PlaygroundSDKLike | null;
 }) {
+  const { message } = AntdApp.useApp();
   const { config, configString, loadConfig, syncFromStorage } = useEnvConfig();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tempConfigString, setTempConfigString] = useState(configString);
@@ -25,8 +27,7 @@ export function EnvConfig({
     useState<ConnectivityTestResult | null>(null);
   const [connectivityLoading, setConnectivityLoading] = useState(false);
   const midsceneModelName = config.MIDSCENE_MODEL_NAME;
-  const canRunConnectivityTest =
-    !!playgroundSDK?.runConnectivityTest && !!playgroundSDK?.overrideConfig;
+  const canRunConnectivityTest = !!playgroundSDK?.runConnectivityTest;
   const componentRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<number | null>(null);
 
@@ -56,19 +57,18 @@ export function EnvConfig({
   const handleSaveAndRun = async () => {
     const sdk = playgroundSDK;
 
-    if (!sdk?.overrideConfig || !sdk?.runConnectivityTest) {
+    if (!sdk?.runConnectivityTest) {
       return;
     }
 
     try {
       setConnectivityLoading(true);
       setConnectivityResult(null);
-      loadConfig(tempConfigString);
-      const nextConfig = useEnvConfig.getState().config;
-      await sdk.overrideConfig(nextConfig);
-      const result = await sdk.runConnectivityTest();
+      const nextConfig = parseConfig(tempConfigString);
+      const result = await sdk.runConnectivityTest(nextConfig);
       setConnectivityResult(result);
       if (result.passed) {
+        loadConfig(tempConfigString);
         message.success('Model verification passed');
         clearCloseTimer();
         closeTimerRef.current = window.setTimeout(() => {
@@ -81,20 +81,10 @@ export function EnvConfig({
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      message.error(`Model verification failed: ${errorMessage}`);
+      notifyError(error, { title: 'Model verification failed' });
       setConnectivityResult({
         passed: false,
-        checks: [
-          {
-            name: 'text',
-            intent: 'default',
-            modelName: useEnvConfig.getState().config.MIDSCENE_MODEL_NAME || '',
-            modelFamily: undefined,
-            passed: false,
-            durationMs: 0,
-            message: errorMessage,
-          },
-        ],
+        message: errorMessage,
       });
     } finally {
       setConnectivityLoading(false);
@@ -181,7 +171,7 @@ export function EnvConfig({
                 loading={connectivityLoading}
                 onClick={handleSaveAndRun}
               >
-                Save and Verify Model
+                Verify and Save Model
               </Button>
             ) : null}
             <Button key="save" type="primary" onClick={handleOk}>
@@ -219,16 +209,12 @@ export function EnvConfig({
                 : 'Model verification failed'
             }
             description={
-              <div>
-                {connectivityResult.checks.map((item) => (
-                  <div key={item.name}>
-                    {item.modelName} ({item.intent}):{' '}
-                    {item.passed
-                      ? 'OK.'
-                      : `Failed.${item.message ? ` ${item.message}` : ''}`}
-                  </div>
-                ))}
-              </div>
+              connectivityResult.passed ? undefined : (
+                <span style={{ whiteSpace: 'pre-wrap' }}>
+                  {connectivityResult.message ||
+                    'Connectivity test failed without details.'}
+                </span>
+              )
             }
             style={{ marginTop: 16 }}
           />

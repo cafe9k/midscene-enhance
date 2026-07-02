@@ -1,13 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { join } from 'node:path';
 import type { NodeType } from '@midscene/shared/constants';
 import type { CreateOpenAIClientFn, TModelConfig } from '@midscene/shared/env';
 import type {
@@ -18,9 +10,7 @@ import type {
 } from '@midscene/shared/types';
 import type { z } from 'zod';
 import type { TUserPrompt } from './common';
-import { restoreImageReferences } from './dump/screenshot-restoration';
-import { ScreenshotStore } from './dump/screenshot-store';
-import { ScreenshotItem } from './screenshot-item';
+import type { ScreenshotItem } from './screenshot-item';
 import type {
   DetailedLocateParam,
   MidsceneYamlFlowItem,
@@ -36,6 +26,13 @@ export type {
 } from '@midscene/shared/types';
 export * from './yaml';
 
+export { ServiceError } from './errors';
+export {
+  ExecutionDump,
+  ReportActionDump,
+  GroupedActionDump,
+} from './dump/report-action-dump';
+
 export type AIUsageInfo = Record<string, any> & {
   prompt_tokens: number | undefined;
   completion_tokens: number | undefined;
@@ -44,7 +41,19 @@ export type AIUsageInfo = Record<string, any> & {
   time_cost: number | undefined;
   model_name: string | undefined;
   model_description: string | undefined;
+  /**
+   * Raw top-level `.model` value returned by the model service response.
+   */
+  response_model_name: string | undefined;
+  /**
+   * Semantic intent of the model call, such as default, planning, or insight.
+   */
   intent: string | undefined;
+  /**
+   * Config slot where the model config was resolved from. For example, a
+   * planning call may use the default slot when no planning model is configured.
+   */
+  slot: string | undefined;
   request_id: string | undefined;
 };
 
@@ -60,12 +69,16 @@ export type AISingleElementResponseByPosition = {
   text: string;
 };
 
-export interface AIElementCoordinatesResponse {
-  bbox: [number, number, number, number];
+export type LocateResultPoint = [number, number];
+export type Bbox = [number, number, number, number];
+export type LocateResultBbox = Bbox;
+export type PixelBbox = Bbox;
+
+export interface AIElementLocateResponse {
+  bbox?: LocateResultBbox;
+  point?: LocateResultPoint;
   errors?: string[];
 }
-
-export type AIElementResponse = AIElementCoordinatesResponse;
 
 export interface AIDataExtractionResponse<DataDemand> {
   data: DataDemand;
@@ -74,8 +87,10 @@ export interface AIDataExtractionResponse<DataDemand> {
 }
 
 export interface AISectionLocatorResponse {
-  bbox: [number, number, number, number];
-  references_bbox?: [number, number, number, number][];
+  bbox?: LocateResultBbox;
+  point?: LocateResultPoint;
+  references_bbox?: LocateResultBbox[];
+  references_point?: LocateResultPoint[];
   error?: string;
 }
 
@@ -98,12 +113,17 @@ export interface LocateValidatorResult {
   rect: Rect;
   center: [number, number];
   centerDistance?: number;
+  includedInRect?: boolean;
 }
 
 export interface AgentDescribeElementAtPointResult {
   prompt: string;
   deepLocate: boolean;
+  deepDescribe: boolean;
   verifyResult?: LocateValidatorResult;
+  success: boolean;
+  error?: string;
+  failureStage?: 'describe' | 'verify';
 }
 
 /**
@@ -160,10 +180,20 @@ export type DeepThinkOption = 'unset' | true | false;
 export interface ServiceTaskInfo {
   durationMs: number;
   formatResponse?: string;
+  /**
+   * Adapter-extracted content used by Midscene for parsing. This is not the
+   * full provider response or choices[0].message.
+   */
   rawResponse?: string;
+  rawChoiceMessage?: unknown;
   usage?: AIUsageInfo;
   searchArea?: Rect;
+  /**
+   * Adapter-extracted content from the search-area model call. This is not the
+   * full provider response or choices[0].message.
+   */
   searchAreaRawResponse?: string;
+  searchAreaRawChoiceMessage?: unknown;
   searchAreaUsage?: AIUsageInfo;
   reasoning_content?: string;
 }
@@ -190,7 +220,7 @@ export interface ServiceDump extends DumpMeta {
     dataDemand?: ServiceExtractParam;
     assertion?: TUserPrompt;
   };
-  matchedElement: LocateResultElement[];
+  matchedElement?: LocateResultElement[];
   matchedRect?: Rect;
   deepLocate?: boolean;
   data: any;
@@ -217,16 +247,6 @@ export interface ServiceExtractResult<T> extends ServiceResultBase {
   thought?: string;
   usage?: AIUsageInfo;
   reasoning_content?: string;
-}
-
-export class ServiceError extends Error {
-  dump: ServiceDump;
-
-  constructor(message: string, dump: ServiceDump) {
-    super(message);
-    this.name = 'ServiceError';
-    this.dump = dump;
-  }
 }
 
 // intermediate variables to optimize the return value by AI
@@ -256,6 +276,8 @@ export interface AgentWaitForOpt extends ServiceExtractOption {
 
 export interface AgentAssertOpt {
   keepRawResponse?: boolean;
+  context?: string;
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -264,8 +286,14 @@ export interface AgentAssertOpt {
  */
 
 export interface PlanningLocateParam extends DetailedLocateParam {
-  bbox?: [number, number, number, number];
+  bbox?: LocateResultBbox;
+  point?: LocateResultPoint;
 }
+
+export type PlanningLocateParamWithLocatedPixelBbox = PlanningLocateParam & {
+  /** Pixel bbox of the located element in screenshot coordinates. */
+  locatedPixelBbox: PixelBbox;
+};
 
 export interface PlanningAction<ParamType = any> {
   thought?: string;
@@ -299,7 +327,12 @@ export interface PlanningAIResponse
   extends Omit<RawResponsePlanningAIResponse, 'action'> {
   actions?: PlanningAction[];
   usage?: AIUsageInfo;
+  /**
+   * Adapter-extracted content used by Midscene for parsing. This is not the
+   * full provider response or choices[0].message.
+   */
   rawResponse?: string;
+  rawChoiceMessage?: unknown;
   yamlFlow?: MidsceneYamlFlowItem[];
   yamlString?: string;
   error?: string;
@@ -352,11 +385,117 @@ export interface ExecutionTaskProgressOptions {
   onTaskStart?: (task: ExecutionTask) => Promise<void> | void;
 }
 
+/**
+ * Generic agent progress bus.
+ *
+ * Progress notifications are a single, generic stream the agent broadcasts as
+ * it works. Each event is a thin envelope: a `scope` naming the producer, a
+ * `phase` within that producer's lifecycle, a monotonic `sequence`, and a
+ * structured, presentation-free `data` payload. The bus knows nothing about any
+ * particular producer's payload - consumers narrow by `scope`. `aiAct` is the
+ * first producer ("pilot") on this bus; others (queries, waits, ...) can be
+ * added without touching the bus, the listener API, or the renderer core.
+ */
+export interface AgentProgressEvent<
+  TScope extends string = string,
+  TData = unknown,
+  TPhase extends string = string,
+> {
+  scope: TScope;
+  phase: TPhase;
+  sequence: number;
+  data: TData;
+}
+
+export type AgentProgressListener<
+  TScope extends string = string,
+  TData = unknown,
+  TPhase extends string = string,
+> = (event: AgentProgressEvent<TScope, TData, TPhase>) => Promise<void> | void;
+
+// --- aiAct: the first producer on the generic progress bus ---
+
+export type AiActProgressPhase =
+  | 'start'
+  | 'plan_thinking'
+  | 'plan_planned'
+  | 'plan_action'
+  | 'plan_failed'
+  | 'action_running'
+  | 'action_done'
+  | 'action_failed'
+  | 'complete'
+  | 'failed';
+
+export interface AiActProgressAction {
+  name: string;
+  target?: string;
+  point?: [number, number];
+  bbox?: [number, number, number, number];
+  /**
+   * Structured, compacted summary of the action params for actions that are
+   * not described by a point/bbox (e.g. `Sleep` -> `{ timeMs }`). This is data,
+   * never a pre-formatted display string; consumers decide how to render it.
+   */
+  param?: unknown;
+}
+
+/**
+ * Structured payload carried by aiAct progress events. The producer only
+ * reports *what happened* as data: the action involved, the raw text the model
+ * produced, timings and errors. It never assembles human-readable log lines or
+ * truncates strings for display - that belongs to whichever layer consumes the
+ * stream (e.g. the CLI verbose renderer).
+ */
+export interface AiActProgressData {
+  /** Original user instruction, present on the `start` phase. */
+  prompt?: string;
+  planIndex?: number;
+  planLimit?: number;
+  /** Latest screenshot, present on `plan_thinking`. */
+  screenshot?: ScreenshotItem;
+  /** Structured action descriptor, present on the `*action*` phases. */
+  action?: AiActProgressAction;
+  /**
+   * Raw, untruncated semantic text produced by the model. Consumers choose
+   * which field to surface and how to format/truncate it.
+   */
+  thought?: string;
+  log?: string;
+  output?: string;
+  /** Wall-clock cost of an action, present on `action_done`/`action_failed`. */
+  durationMs?: number;
+  error?: string;
+}
+
+export const aiActProgressScope = 'aiAct';
+
 export interface ExecutionRecorderItem {
   type: 'screenshot';
   ts: number;
   screenshot?: ScreenshotItem;
+  description?: string;
   timing?: string;
+}
+
+export interface RecordToReportScreenshot {
+  /**
+   * PNG/JPEG data URI, or raw PNG base64 body.
+   */
+  base64: string;
+  description?: string;
+}
+
+export interface RecordToReportOptions {
+  content?: string;
+  /**
+   * @deprecated Use `screenshots: [{ base64 }]` instead.
+   */
+  screenshotBase64?: string;
+  /**
+   * Custom screenshots to display under a single report entry.
+   */
+  screenshots?: RecordToReportScreenshot[];
 }
 
 export type ExecutionTaskType = 'Planning' | 'Insight' | 'Action Space' | 'Log';
@@ -416,6 +555,11 @@ export type ExecutionTask<
   > & {
     taskId: string;
     status: 'pending' | 'running' | 'finished' | 'failed' | 'cancelled';
+    /**
+     * Optional feedback produced by a task for the next planning round.
+     * This is execution metadata, not part of the action return value.
+     */
+    planningFeedback?: string;
     error?: Error;
     errorMessage?: string;
     errorStack?: string;
@@ -437,6 +581,12 @@ export type ExecutionTask<
       cost?: number;
     };
     usage?: AIUsageInfo;
+    /**
+     * Pixel rect of the deepLocate first-stage search area in screenshot
+     * coordinates. Used by reports to explain the crop/zoom area that the
+     * final locate ran against.
+     */
+    searchArea?: Rect;
     searchAreaUsage?: AIUsageInfo;
     reasoning_content?: string;
   };
@@ -448,135 +598,6 @@ export interface IExecutionDump extends DumpMeta {
   description?: string;
   tasks: ExecutionTask[];
   aiActContext?: string;
-}
-
-/**
- * Replacer function for JSON serialization that handles Page, Browser objects and ScreenshotItem
- */
-function replacerForDumpSerialization(_key: string, value: any): any {
-  if (value && value.constructor?.name === 'Page') {
-    return '[Page object]';
-  }
-  if (value && value.constructor?.name === 'Browser') {
-    return '[Browser object]';
-  }
-  // Handle ScreenshotItem serialization
-  if (value && typeof value.toSerializable === 'function') {
-    return value.toSerializable();
-  }
-  return value;
-}
-
-/**
- * Reviver function for JSON deserialization that keeps screenshot references
- * as plain objects. Resolution is handled lazily by restoreImageReferences.
- *
- * @param key - JSON key being processed
- * @param value - JSON value being processed
- * @returns Restored value
- */
-function reviverForDumpDeserialization(key: string, value: any): any {
-  // Only process screenshot fields
-  if (key !== 'screenshot' || typeof value !== 'object' || value === null) {
-    return value;
-  }
-
-  if (ScreenshotItem.isSerialized(value)) {
-    return value;
-  }
-
-  return value;
-}
-
-/**
- * ExecutionDump class for serializing and deserializing execution dumps
- */
-export class ExecutionDump implements IExecutionDump {
-  id?: string;
-  logTime: number;
-  name: string;
-  description?: string;
-  tasks: ExecutionTask[];
-  aiActContext?: string;
-
-  constructor(data: IExecutionDump) {
-    this.id = data.id;
-    this.logTime = data.logTime;
-    this.name = data.name;
-    this.description = data.description;
-    this.tasks = data.tasks;
-    this.aiActContext = data.aiActContext;
-  }
-
-  /**
-   * Serialize the ExecutionDump to a JSON string
-   */
-  serialize(indents?: number): string {
-    return JSON.stringify(this.toJSON(), replacerForDumpSerialization, indents);
-  }
-
-  /**
-   * Convert to a plain object for JSON serialization
-   */
-  toJSON(): IExecutionDump {
-    return {
-      id: this.id,
-      logTime: this.logTime,
-      name: this.name,
-      description: this.description,
-      tasks: this.tasks.map((task) => ({
-        ...task,
-        recorder: task.recorder || [],
-      })),
-      aiActContext: this.aiActContext,
-    };
-  }
-
-  /**
-   * Create an ExecutionDump instance from a serialized JSON string
-   */
-  static fromSerializedString(serialized: string): ExecutionDump {
-    const parsed = JSON.parse(
-      serialized,
-      reviverForDumpDeserialization,
-    ) as IExecutionDump;
-    return new ExecutionDump(parsed);
-  }
-
-  /**
-   * Create an ExecutionDump instance from a plain object
-   */
-  static fromJSON(data: IExecutionDump): ExecutionDump {
-    return new ExecutionDump(data);
-  }
-
-  /**
-   * Collect all ScreenshotItem instances from tasks.
-   * Scans through uiContext and recorder items to find screenshots.
-   *
-   * @returns Array of ScreenshotItem instances
-   */
-  collectScreenshots(): ScreenshotItem[] {
-    const screenshots: ScreenshotItem[] = [];
-
-    for (const task of this.tasks) {
-      // Collect uiContext.screenshot if present
-      if (task.uiContext?.screenshot instanceof ScreenshotItem) {
-        screenshots.push(task.uiContext.screenshot);
-      }
-
-      // Collect recorder screenshots
-      if (task.recorder) {
-        for (const record of task.recorder) {
-          if (record.screenshot instanceof ScreenshotItem) {
-            screenshots.push(record.screenshot);
-          }
-        }
-      }
-    }
-
-    return screenshots;
-  }
 }
 
 /*
@@ -667,12 +688,20 @@ export type ExecutionTaskLog = ExecutionTask<ExecutionTaskLogApply>;
 task - planning
 */
 
+export interface ExecutionTaskPlanningParam {
+  userInstruction: TUserPrompt;
+  userInstructionDisplay?: string;
+  replanningCycleLimit?: number;
+  aiActContext?: string;
+  imagesIncludeCount?: number;
+  deepThink?: DeepThinkOption;
+  subGoalStatus?: string;
+  memoriesStatus?: string;
+}
+
 export type ExecutionTaskPlanningApply = ExecutionTaskApply<
   'Planning',
-  {
-    userInstruction: string;
-    aiActContext?: string;
-  },
+  ExecutionTaskPlanningParam,
   PlanningAIResponse
 >;
 
@@ -698,6 +727,13 @@ export type ExecutionTaskPlanningLocateApply = ExecutionTaskApply<
 
 export type ExecutionTaskPlanningLocate =
   ExecutionTask<ExecutionTaskPlanningLocateApply>;
+
+/*
+How a report file stores screenshots:
+- `inline`: base64 image script tags embedded in the single HTML file
+- `directory`: external PNG files under a sibling `screenshots/` dir
+*/
+export type ScreenshotMode = 'inline' | 'directory';
 
 /*
 Report metadata - extracted from ReportActionDump for per-execution writes
@@ -744,216 +780,6 @@ export interface ModelBrief {
    */
   modelDescription?: string;
 }
-
-/**
- * ReportActionDump class for serializing and deserializing report action dumps
- */
-export class ReportActionDump implements IReportActionDump {
-  sdkVersion: string;
-  groupName: string;
-  groupDescription?: string;
-  modelBriefs: ModelBrief[];
-  executions: ExecutionDump[];
-  deviceType?: string;
-
-  constructor(data: IReportActionDump) {
-    this.sdkVersion = data.sdkVersion;
-    this.groupName = data.groupName;
-    this.groupDescription = data.groupDescription;
-    this.modelBriefs = data.modelBriefs;
-    this.executions = data.executions.map((exec) =>
-      exec instanceof ExecutionDump ? exec : ExecutionDump.fromJSON(exec),
-    );
-    this.deviceType = data.deviceType;
-  }
-
-  /**
-   * Serialize the ReportActionDump to a JSON string
-   * Uses compact { $screenshot: id } format
-   */
-  serialize(indents?: number): string {
-    return JSON.stringify(this.toJSON(), replacerForDumpSerialization, indents);
-  }
-
-  /**
-   * Serialize the ReportActionDump with inline screenshots to a JSON string.
-   * Each ScreenshotItem is replaced with { base64: "...", capturedAt }.
-   */
-  serializeWithInlineScreenshots(indents?: number): string {
-    const processValue = (obj: unknown): unknown => {
-      if (obj instanceof ScreenshotItem) {
-        return { base64: obj.base64, capturedAt: obj.capturedAt };
-      }
-      if (Array.isArray(obj)) {
-        return obj.map(processValue);
-      }
-      if (obj && typeof obj === 'object') {
-        const entries = Object.entries(obj).map(([key, value]) => [
-          key,
-          processValue(value),
-        ]);
-        return Object.fromEntries(entries);
-      }
-      return obj;
-    };
-
-    const data = processValue(this.toJSON());
-    return JSON.stringify(data, null, indents);
-  }
-
-  /**
-   * Convert to a plain object for JSON serialization
-   */
-  toJSON(): IReportActionDump {
-    return {
-      sdkVersion: this.sdkVersion,
-      groupName: this.groupName,
-      groupDescription: this.groupDescription,
-      modelBriefs: this.modelBriefs,
-      executions: this.executions.map((exec) => exec.toJSON()),
-      deviceType: this.deviceType,
-    };
-  }
-
-  /**
-   * Create a ReportActionDump instance from a serialized JSON string
-   */
-  static fromSerializedString(serialized: string): ReportActionDump {
-    const parsed = JSON.parse(
-      serialized,
-      reviverForDumpDeserialization,
-    ) as IReportActionDump;
-    return new ReportActionDump(parsed);
-  }
-
-  /**
-   * Create a ReportActionDump instance from a plain object
-   */
-  static fromJSON(data: IReportActionDump): ReportActionDump {
-    return new ReportActionDump(data);
-  }
-
-  /**
-   * Collect all ScreenshotItem instances from all executions.
-   *
-   * @returns Array of all ScreenshotItem instances across all executions
-   */
-  collectAllScreenshots(): ScreenshotItem[] {
-    const screenshots: ScreenshotItem[] = [];
-    for (const execution of this.executions) {
-      screenshots.push(...execution.collectScreenshots());
-    }
-    return screenshots;
-  }
-
-  /**
-   * Serialize the dump to files with screenshots as separate PNG files.
-   * Creates:
-   * - {basePath} - dump JSON with { $screenshot: id } references
-   * - {basePath}.screenshots/ - PNG files
-   *
-   * @param basePath - Base path for the dump file
-   */
-  serializeToFiles(basePath: string): void {
-    const screenshotsDir = `${basePath}.screenshots`;
-    if (!existsSync(screenshotsDir)) {
-      mkdirSync(screenshotsDir, { recursive: true });
-    }
-
-    const screenshots = this.collectAllScreenshots();
-
-    for (const screenshot of screenshots) {
-      const imagePath = join(
-        screenshotsDir,
-        `${screenshot.id}.${screenshot.extension}`,
-      );
-      if (existsSync(imagePath)) {
-        continue;
-      }
-
-      const rawBase64 = screenshot.rawBase64;
-      writeFileSync(imagePath, Buffer.from(rawBase64, 'base64'));
-    }
-
-    // Write dump JSON with references
-    writeFileSync(basePath, this.serialize(), 'utf-8');
-  }
-
-  /**
-   * Read dump from files and return JSON string with inline screenshots.
-   * Reads the dump JSON and screenshot files, then inlines the base64 data.
-   *
-   * @param basePath - Base path for the dump file
-   * @returns JSON string with inline screenshots ({ base64: "..." } format)
-   */
-  static fromFilesAsInlineJson(basePath: string): string {
-    const dumpString = readFileSync(basePath, 'utf-8');
-    const screenshotsDir = `${basePath}.screenshots`;
-
-    const loadFromExecutionScreenshotDir = (id: string, mimeType: string) => {
-      const ext = mimeType === 'image/jpeg' ? 'jpeg' : 'png';
-      const filePath = join(screenshotsDir, `${id}.${ext}`);
-      if (!existsSync(filePath)) {
-        return '';
-      }
-      const data = readFileSync(filePath);
-      return `data:image/${ext};base64,${data.toString('base64')}`;
-    };
-
-    // Restore image references
-    const dumpData = JSON.parse(dumpString);
-    const store = new ScreenshotStore({
-      mode: 'directory',
-      reportPath: basePath,
-    });
-    const processedData = restoreImageReferences(dumpData, (ref) => {
-      const executionFileImage = loadFromExecutionScreenshotDir(
-        ref.id,
-        ref.mimeType,
-      );
-      if (executionFileImage) {
-        return executionFileImage;
-      }
-
-      if (ref.storage === 'inline') {
-        return '';
-      }
-      return store.loadBase64(ref);
-    });
-    return JSON.stringify(processedData);
-  }
-
-  /**
-   * Clean up all files associated with a serialized dump.
-   *
-   * @param basePath - Base path for the dump file
-   */
-  static cleanupFiles(basePath: string): void {
-    const filesToClean = [basePath, `${basePath}.screenshots`];
-
-    for (const filePath of filesToClean) {
-      try {
-        rmSync(filePath, { force: true, recursive: true });
-      } catch {
-        // Ignore errors - file may already be deleted
-      }
-    }
-  }
-
-  /**
-   * Get all file paths associated with a serialized dump.
-   *
-   * @param basePath - Base path for the dump file
-   * @returns Array of all associated file paths
-   */
-  static getFilePaths(basePath: string): string[] {
-    return [basePath, `${basePath}.screenshots`];
-  }
-}
-
-// Backward-compatible aliases for existing external consumers.
-export type GroupedActionDump = ReportActionDump;
-export const GroupedActionDump = ReportActionDump;
 
 export type InterfaceType =
   | 'puppeteer'
@@ -1003,11 +829,15 @@ export interface DeviceAction<TParam = any, TReturn = any> {
   description?: string;
   interfaceAlias?: string;
   paramSchema?: z.ZodType<TParam>;
-  call: (param: TParam, context: ExecutorContext) => Promise<TReturn> | TReturn;
+  call: (
+    param: TParam,
+    context?: ExecutorContext,
+  ) => Promise<TReturn> | TReturn;
+  delayBeforeRunner?: number;
   delayAfterRunner?: number;
   /**
    * An example param object for this action.
-   * Locate fields with { prompt } will automatically get bbox injected when needed.
+   * Locate fields with { prompt } may be resolved to internal pixel bboxes when needed.
    */
   sample?: { [K in keyof TParam]?: any };
 }
@@ -1046,6 +876,12 @@ export interface WebElementInfo extends BaseElement {
 export type CacheConfig = {
   strategy?: 'read-only' | 'read-write' | 'write-only';
   id: string;
+  /**
+   * Optional cache directory path.
+   * When set, cache files are written to this directory instead of
+   * `<MIDSCENE_RUN_DIR>/cache`.
+   */
+  cacheDir?: string;
 };
 
 export type Cache =
@@ -1088,11 +924,13 @@ export interface AgentOpt {
   aiActionContext?: string;
   /* custom report file name */
   reportFileName?: string;
+  reportAttributes?: ReportAttributes;
   modelConfig?: TModelConfig;
   cache?: Cache;
   /**
    * Maximum number of replanning cycles for aiAct.
-   * Defaults to 20 (40 for `vlm-ui-tars`) when not provided.
+   * Defaults are resolved by the active model adapter: 20 for standard planning,
+   * 40 for UI-TARS, and 100 for Auto-GLM.
    * If omitted, the agent will also read `MIDSCENE_REPLANNING_CYCLE_LIMIT` for backward compatibility.
    */
   replanningCycleLimit?: number;
@@ -1105,11 +943,12 @@ export interface AgentOpt {
   waitAfterAction?: number;
 
   /**
-   * When set to true, Midscene will use the target device's time (Android/iOS)
-   * instead of the system time. Useful when the device time differs from the
-   * host machine. Default: false
+   * When set to true, Midscene will use the target device's formatted local
+   * time instead of the runtime system time. The target interface must implement
+   * getDeviceLocalTimeString to provide device-local wall-clock time.
+   * Default: false
    */
-  useDeviceTimestamp?: boolean;
+  useDeviceTime?: boolean;
 
   /**
    * Custom screenshot shrink factor to reduce AI token usage.

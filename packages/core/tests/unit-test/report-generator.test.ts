@@ -21,7 +21,7 @@ import {
   type ReportMeta,
   type UIContext,
 } from '@/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   countGroupedDumpScripts,
   extractGroupedDumpScripts,
@@ -113,6 +113,34 @@ describe('ReportGenerator — append-only model', () => {
     }
   });
 
+  // Writer contract for the self-describing screenshot mode. The merger reads
+  // this attribute back to decide directory vs inline, so the generated value
+  // must match for both modes (see report.ts readDeclaredScreenshotMode).
+  describe('data-screenshot-mode attribute', () => {
+    it.each(['inline', 'directory'] as const)(
+      'stamps data-screenshot-mode="%s" on the dump script tag',
+      async (mode) => {
+        const reportPath =
+          mode === 'directory'
+            ? join(tmpDir, 'dir-mode', 'index.html')
+            : join(tmpDir, 'inline-mode.html');
+        const generator = new ReportGenerator({
+          reportPath,
+          screenshotMode: mode,
+          autoPrint: false,
+        });
+        generator.onExecutionUpdate(
+          createExecution([ScreenshotItem.create(fakeBase64(100), Date.now())]),
+          defaultReportMeta,
+        );
+        await generator.finalize();
+
+        const html = readFileSync(reportPath, 'utf-8');
+        expect(html).toContain(`data-screenshot-mode="${mode}"`);
+      },
+    );
+  });
+
   describe('inline mode — append-only strategy', () => {
     it('should write each screenshot image tag exactly once across multiple updates', async () => {
       const reportPath = join(tmpDir, 'inline-test.html');
@@ -199,7 +227,7 @@ describe('ReportGenerator — append-only model', () => {
       expect(countGroupedDumpScripts(html)).toBe(3);
     });
 
-    it('should append to existing report file when a new generator uses the same path', async () => {
+    it('should overwrite existing report file by default when a new generator uses the same path', async () => {
       const reportPath = join(tmpDir, 'append-existing-report.html');
       const firstGenerator = new ReportGenerator({
         reportPath,
@@ -235,9 +263,9 @@ describe('ReportGenerator — append-only model', () => {
       await secondGenerator.finalize();
 
       const html = readFileSync(reportPath, 'utf-8');
-      // each finalize() re-writes last execution once, so total dump tags = 4
-      expect(countGroupedDumpScripts(html)).toBe(4);
-      expect(html).toContain(firstScreenshot.id);
+      // second finalize() re-writes last execution once, so total dump tags = 2
+      expect(countGroupedDumpScripts(html)).toBe(2);
+      expect(html).not.toContain(firstScreenshot.id);
       expect(html).toContain(secondScreenshot.id);
     });
 
@@ -278,10 +306,10 @@ describe('ReportGenerator — append-only model', () => {
       expect(firstAttrs.playwright_test_duration).toBe('123');
       expect(firstAttrs.ignored_null).toBeUndefined();
       expect(firstAttrs.ignored_undefined).toBeUndefined();
-      expect(firstAttrs['data-group-id']).not.toBe('external-group-id');
+      expect(firstAttrs['data-group-id']).toBe('external-group-id');
 
       const secondAttrs = parseScriptAttributes(dumpScripts[1].openTag);
-      expect(secondAttrs['data-group-id']).toBe(firstAttrs['data-group-id']);
+      expect(secondAttrs['data-group-id']).toBe('external-group-id');
       expect(secondAttrs.playwright_test_title).toBe('initial title');
       expect(secondAttrs.playwright_test_status).toBe('passed');
       expect(secondAttrs.playwright_test_duration).toBe('123');
@@ -324,13 +352,14 @@ describe('ReportGenerator — append-only model', () => {
       );
     });
 
-    it('should continue execution dump index when appending with the same report path', async () => {
+    it('should continue execution dump index when appending with reuseExistingReport enabled', async () => {
       const reportPath = join(tmpDir, 'append-existing-report-with-json.html');
       const firstGenerator = new ReportGenerator({
         reportPath,
         screenshotMode: 'inline',
         persistExecutionDump: true,
         autoPrint: false,
+        reuseExistingReport: true,
       });
       firstGenerator.onExecutionUpdate(
         createExecution(
@@ -347,6 +376,7 @@ describe('ReportGenerator — append-only model', () => {
         screenshotMode: 'inline',
         persistExecutionDump: true,
         autoPrint: false,
+        reuseExistingReport: true,
       });
       secondGenerator.onExecutionUpdate(
         createExecution(
@@ -597,6 +627,89 @@ describe('ReportGenerator — append-only model', () => {
       expect(() => screenshot.base64).not.toThrow();
       expect(screenshot.base64).toContain('data:image/png;base64,');
       expect(screenshot.base64).toContain('AAAA');
+    });
+  });
+
+  describe('autoPrint — report path logging', () => {
+    let logSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+    });
+
+    const updatedLogs = () =>
+      logSpy.mock.calls
+        .map((args) => String(args[0]))
+        .filter((msg) => msg.includes('Midscene - report file updated:'));
+
+    it('does not log on construction, and logs "report file updated" once on first write', async () => {
+      const reportPath = join(tmpDir, 'autoprint-inline.html');
+      const generator = new ReportGenerator({
+        reportPath,
+        screenshotMode: 'inline',
+      });
+
+      // Constructing the generator must not print anything yet.
+      expect(updatedLogs()).toHaveLength(0);
+
+      const execution = createExecution([
+        ScreenshotItem.create(fakeBase64(100), Date.now()),
+      ]);
+
+      generator.onExecutionUpdate(execution, defaultReportMeta);
+      await generator.flush();
+
+      expect(updatedLogs()).toEqual([
+        `Midscene - report file updated: ${reportPath}`,
+      ]);
+
+      // Subsequent updates and finalize must not print the tip again.
+      generator.onExecutionUpdate(execution, defaultReportMeta);
+      await generator.flush();
+      await generator.finalize();
+
+      expect(updatedLogs()).toHaveLength(1);
+    });
+
+    it('does not log when autoPrint is disabled', async () => {
+      const reportPath = join(tmpDir, 'autoprint-disabled.html');
+      const generator = new ReportGenerator({
+        reportPath,
+        screenshotMode: 'inline',
+        autoPrint: false,
+      });
+
+      generator.onExecutionUpdate(
+        createExecution([ScreenshotItem.create(fakeBase64(100), Date.now())]),
+        defaultReportMeta,
+      );
+      await generator.flush();
+      await generator.finalize();
+
+      expect(updatedLogs()).toHaveLength(0);
+    });
+
+    it('points at "npx serve <dir>" in directory mode', async () => {
+      const reportDir = join(tmpDir, 'autoprint-dir');
+      const reportPath = join(reportDir, 'index.html');
+      const generator = new ReportGenerator({
+        reportPath,
+        screenshotMode: 'directory',
+      });
+
+      generator.onExecutionUpdate(
+        createExecution([ScreenshotItem.create(fakeBase64(100), Date.now())]),
+        defaultReportMeta,
+      );
+      await generator.flush();
+
+      expect(updatedLogs()).toEqual([
+        `Midscene - report file updated: npx serve ${reportDir}`,
+      ]);
     });
   });
 
@@ -930,6 +1043,14 @@ describe('ReportGenerator — append-only model', () => {
         generateReport: false,
       });
       expect(gen).toBe(nullReportGenerator);
+    });
+
+    it('should reject empty reportFileName when generateReport is false', () => {
+      expect(() =>
+        ReportGenerator.create('', {
+          generateReport: false,
+        }),
+      ).toThrow('reportFileName must be a non-empty string');
     });
 
     it('should throw when persistExecutionDump is true and generateReport is false', () => {

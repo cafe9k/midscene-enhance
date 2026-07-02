@@ -144,12 +144,11 @@
           line-height: 20px;
 
           a {
-            color: #1677ff;
+            color: @main-text;
             text-decoration: none;
             transition: color 0.2s;
 
             &:hover {
-              color: #4096ff;
               text-decoration: underline;
             }
           }
@@ -227,6 +226,32 @@
         font-size: 14px;
         line-height: 18px;
       }
+    }
+
+    .title-collapsible {
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+
+      .collapse-icon {
+        font-size: 10px;
+        margin-left: 6px;
+        color: #00000073;
+        transition: transform 0.2s;
+      }
+
+      &:hover {
+        color: #1677ff;
+
+        .collapse-icon {
+          color: #1677ff;
+        }
+      }
+    }
+
+    .item-collapsible {
+      margin-bottom: 4px;
     }
 
     .subtitle {
@@ -350,10 +375,10 @@
           color: #9599a6;
 
           a {
-            color: #4096ff;
+            color: #f8fafd;
 
             &:hover {
-              color: #69b1ff;
+              text-decoration: underline;
             }
           }
         }
@@ -387,6 +412,20 @@
 
         .title-tag {
           color: rgba(255, 255, 255, 0.45);
+        }
+      }
+
+      .title-collapsible {
+        .collapse-icon {
+          color: #9599a6;
+        }
+
+        &:hover {
+          color: #4096ff;
+
+          .collapse-icon {
+            color: #4096ff;
+          }
         }
       }
 

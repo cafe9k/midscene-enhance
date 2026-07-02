@@ -16,12 +16,21 @@ export type WebPageOpt = {
   forceSameTabNavigation?: boolean /* if limit the new tab to the current page, default true */;
   enableTouchEventsInActionSpace?: boolean;
   /**
+   * Per-character delay (ms) used when typing text via the underlying
+   * Puppeteer/Playwright `keyboard.type` API. Default undefined leaves the
+   * option unset and uses the underlying driver's own default.
+   */
+  keyboardTypeDelay?: number;
+  /**
    * Force Chrome to render select elements using base-select appearance instead of OS-native rendering.
    * This makes select elements visible in screenshots captured by Playwright/Puppeteer.
    *
    * Reference: https://developer.chrome.com/blog/a-customizable-select
    *
    * When enabled, adds a style tag with `select { appearance: base-select !important; }` to the page.
+   *
+   * Defaults to `true`. Set to `false` to opt out (e.g. on older Chrome/driver
+   * versions that do not support `appearance: base-select`).
    */
   forceChromeSelectRendering?: boolean;
   beforeInvokeAction?: () => Promise<void>;

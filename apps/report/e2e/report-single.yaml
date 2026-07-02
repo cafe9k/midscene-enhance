@@ -5,9 +5,9 @@ tasks:
   # --- Basic loading ---
   - name: report loads and displays tasks
     flow:
-      - sleep: 3000
-      - aiAssert: There is a sidebar on the left showing a task execution list with task names and time costs
-      - aiAssert: There is a 'Record' timeline section with screenshot thumbnails
+      - sleep: 5000
+      - aiAssert: The report page is loaded with a left-side task list table. The table shows multiple task rows, visible task names, and a time or duration column for the tasks.
+      - aiAssert: The main report panel shows a "Record" timeline section with visible screenshot thumbnails or frame previews.
 
   # --- Player area visible with controls ---
   - name: player area is visible with playback controls
@@ -17,19 +17,28 @@ tasks:
   # --- Settings popup ---
   - name: settings popup opens and shows options
     flow:
-      - ai: Click the settings gear icon on the player controls bar
+      - aiHover:
+        locate:
+          prompt: the central video player replay area, not the timeline thumbnails and not the left task sidebar
+          deepLocate: true
+      - sleep: 300
+      - aiTap:
+        locate:
+          prompt: the visible settings button in the bottom playback control bar. It is the small hexagon or gear-shaped icon in the right-side control group, immediately left of the fullscreen icon and right of the progress bar.
+          deepLocate: true
       - sleep: 1000
-      - aiAssert: A settings popup is visible showing playback speed options or toggle switches
+      - aiAssert: The player settings popup is open above the bottom-right control bar, showing options such as "Focus on cursor", "Subtitle", "Playback speed", and speed choices like "0.5x", "1x", "1.5x", or "2x".
 
   # --- Dark mode ---
   - name: toggle dark mode
     flow:
-      - ai: Click the theme toggle button (sun or moon icon) in the top right corner of the page
-      - sleep: 1000
-      - aiAssert: The page background is dark colored, indicating dark mode is active
+      - aiTap: theme toggle button in the top right header
+      - sleep: 2000
+      - aiAssert: The report UI is in dark theme; the top header, left sidebar, and page chrome are dark charcoal or black rather than white
 
   - name: toggle back to light mode
     flow:
-      - ai: Click the theme toggle button (sun or moon icon) in the top right corner of the page
-      - sleep: 1000
-      - aiAssert: The page background is light or white colored, indicating light mode is active
+      - aiAssert: The report UI is currently in dark theme before clicking the theme toggle again
+      - aiTap: theme toggle button in the top right header
+      - sleep: 2000
+      - aiAssert: The report UI is in light theme; the top header, left sidebar, and page chrome are light or white rather than dark charcoal or black

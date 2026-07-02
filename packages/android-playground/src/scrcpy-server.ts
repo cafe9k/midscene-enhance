@@ -58,6 +58,21 @@ export interface ScrcpyConnectDeviceRequest {
   maxSize?: number;
 }
 
+export interface ScrcpyListedDevice {
+  id: string;
+  name: string;
+  status: string;
+}
+
+export interface ScrcpyDeviceListSource {
+  getDevices(): Promise<ScrcpyListedDevice[]>;
+  subscribe(listener: (devices: ScrcpyListedDevice[]) => void): () => void;
+}
+
+export interface ScrcpyServerOptions {
+  deviceListSource?: ScrcpyDeviceListSource;
+}
+
 export function resolveRequestedDeviceId(
   options: ScrcpyConnectDeviceRequest | undefined,
   currentDeviceId: string | null,
@@ -76,9 +91,12 @@ export default class ScrcpyServer {
   adbClient: AdbServerClient | null = null;
   currentDeviceId: string | null = null;
   devicePollInterval: NodeJS.Timeout | null = null;
+  private deviceListSource?: ScrcpyDeviceListSource;
+  private deviceListSourceUnsubscribe?: () => void;
   lastDeviceList = ''; // use for comparing changes
 
-  constructor() {
+  constructor(options: ScrcpyServerOptions = {}) {
+    this.deviceListSource = options.deviceListSource;
     this.app = express();
     this.httpServer = createServer(this.app);
     this.io = new Server(this.httpServer, {
@@ -124,6 +142,10 @@ export default class ScrcpyServer {
 
   // get devices list
   private async getDevicesList() {
+    if (this.deviceListSource) {
+      return this.deviceListSource.getDevices();
+    }
+
     try {
       debugPage('start to get devices list');
       const client = await this.getAdbClient();
@@ -162,6 +184,39 @@ export default class ScrcpyServer {
       console.error('failed to get devices list:', error);
       return [];
     }
+  }
+
+  private broadcastDevicesList(devices: ScrcpyListedDevice[]) {
+    const currentDevicesJson = JSON.stringify(devices);
+
+    if (this.lastDeviceList === currentDevicesJson) {
+      return;
+    }
+
+    debugPage('devices list changed, push to all connected clients');
+    this.lastDeviceList = currentDevicesJson;
+
+    if (
+      this.currentDeviceId &&
+      !devices.some((device) => device.id === this.currentDeviceId)
+    ) {
+      this.currentDeviceId = null;
+    }
+
+    if (!this.currentDeviceId && devices.length > 0) {
+      const onlineDevices = devices.filter(
+        (device) => device.status.toLowerCase() === 'device',
+      );
+      if (onlineDevices.length > 0) {
+        this.currentDeviceId = onlineDevices[0].id;
+        debugPage('auto select the first online device:', this.currentDeviceId);
+      }
+    }
+
+    this.io.emit('devices-list', {
+      devices,
+      currentDeviceId: this.currentDeviceId,
+    });
   }
 
   // get adb client
@@ -518,9 +573,13 @@ export default class ScrcpyServer {
                       // ensure type field is correctly set to 'configuration' or 'data'
                       const frameType = value.type || 'data'; // default to 'data'
 
-                      // send video frame data to client
+                      // Forward the raw Uint8Array — socket.io transports it as
+                      // a binary frame. Converting via Array.from inflates each
+                      // byte to a boxed JS Number, blowing the V8 old space on
+                      // low-memory hosts (e.g. 8GB Windows) after a few seconds
+                      // of a 2 Mbps stream.
                       socket.emit('video-data', {
-                        data: Array.from(value.data),
+                        data: value.data,
                         type: frameType,
                         timestamp: Date.now(),
                         // fix keyframe access
@@ -529,9 +588,35 @@ export default class ScrcpyServer {
                     }
                   } catch (error) {
                     console.error('error processing video stream:', error);
+                    if (socket.connected) {
+                      socket.emit('error', {
+                        message: 'video stream processing error',
+                      });
+                    }
+                    return;
+                  }
+
+                  // Reader returned `done` without throwing — the underlying
+                  // scrcpy stream closed (device sleep, scrcpy-server exit,
+                  // ADB jitter, etc.). Without this branch the socket stays
+                  // "connected" but no frames flow, so the renderer's decoder
+                  // never tears down and the preview freezes on the last
+                  // frame until the user manually disconnects.
+                  if (socket.connected) {
                     socket.emit('error', {
-                      message: 'video stream processing error',
+                      message: 'video stream ended',
                     });
+                  }
+                  if (scrcpyClient) {
+                    try {
+                      await scrcpyClient.close();
+                    } catch (closeError) {
+                      console.error(
+                        'failed to close scrcpy client after stream ended:',
+                        closeError,
+                      );
+                    }
+                    scrcpyClient = null;
                   }
                 };
 
@@ -617,37 +702,28 @@ export default class ScrcpyServer {
 
   // start device monitoring
   private startDeviceMonitoring() {
+    if (this.deviceListSource) {
+      this.deviceListSourceUnsubscribe = this.deviceListSource.subscribe(
+        (devices) => {
+          this.broadcastDevicesList(devices);
+        },
+      );
+
+      void this.getDevicesList()
+        .then((devices) => {
+          this.broadcastDevicesList(devices);
+        })
+        .catch((error) => {
+          console.error('device monitoring error:', error);
+        });
+      return;
+    }
+
     // check devices list every 3 seconds
     this.devicePollInterval = setInterval(async () => {
       try {
         const devices = await this.getDevicesList();
-        const currentDevicesJson = JSON.stringify(devices);
-
-        // if devices list changed, push to all connected clients
-        if (this.lastDeviceList !== currentDevicesJson) {
-          debugPage('devices list changed, push to all connected clients');
-          this.lastDeviceList = currentDevicesJson;
-
-          // if there is no selected device and there are available devices, auto select the first device
-          if (!this.currentDeviceId && devices.length > 0) {
-            const onlineDevices = devices.filter(
-              (device) => device.status.toLowerCase() === 'device',
-            );
-            if (onlineDevices.length > 0) {
-              this.currentDeviceId = onlineDevices[0].id;
-              debugPage(
-                'auto select the first online device:',
-                this.currentDeviceId,
-              );
-            }
-          }
-
-          // push updated devices list to all connected clients
-          this.io.emit('devices-list', {
-            devices,
-            currentDeviceId: this.currentDeviceId,
-          });
-        }
+        this.broadcastDevicesList(devices);
       } catch (error) {
         console.error('device monitoring error:', error);
       }
@@ -661,8 +737,12 @@ export default class ScrcpyServer {
       clearInterval(this.devicePollInterval);
       this.devicePollInterval = null;
     }
+    if (this.deviceListSourceUnsubscribe) {
+      this.deviceListSourceUnsubscribe();
+      this.deviceListSourceUnsubscribe = undefined;
+    }
 
-    if (this.httpServer) {
+    if (this.httpServer?.listening) {
       return this.httpServer.close();
     }
   }

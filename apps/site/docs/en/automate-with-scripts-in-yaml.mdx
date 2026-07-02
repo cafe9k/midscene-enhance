@@ -41,7 +41,7 @@ To execute YAML workflows from the command line, install the Midscene CLI. See [
 
 Script files use YAML format to describe automation tasks. It defines the target to be manipulated (like a webpage or an Android app) and the series of steps to perform.
 
-A standard `.yaml` script file includes a `web`, `android`, `ios`, or `computer` section to configure the environment, an optional `agent` section to configure AI agent behavior, and a `tasks` section to define the automation tasks.
+A standard `.yaml` script file includes a `web`, `android`, `ios`, `harmony`, or `computer` section to configure the environment, an optional `agent` section to configure AI agent behavior, and a `tasks` section to define the automation tasks.
 
 ```yaml
 web:
@@ -154,10 +154,10 @@ web:
   # The browser user agent, optional.
   userAgent: <ua>
 
-  # The browser viewport width, optional, defaults to 1280.
+  # The browser viewport width, optional, defaults to 1440.
   viewportWidth: <width>
 
-  # The browser viewport height, optional, defaults to 960.
+  # The browser viewport height, optional, defaults to 800.
   viewportHeight: <height>
 
   # The browser's device pixel ratio, optional, defaults to the system's value.
@@ -165,6 +165,18 @@ web:
 
   # Path to a JSON format browser cookie file, optional.
   cookie: <path-to-cookie-file>
+
+  # Chrome download directory (Puppeteer only), optional.
+  # Relative paths are resolved from the current working directory.
+  # Not supported in bridge mode.
+  downloadPath: <path-to-download-directory>
+
+  # Extra HTTP headers sent with every request (Puppeteer only), optional.
+  # Useful when the server validates custom request headers.
+  # Values must be strings; quote values YAML would treat as a boolean or number, e.g. "true".
+  extraHTTPHeaders:
+    X-Custom-Token: my-token
+    Accept-Language: en-US
 
   # The strategy for waiting for network idle in Puppeteer mode, optional.
   # `timeout` applies to the initial opening of `web.url` defined in YAML and to later actions such as `aiTap` and `aiInput`.
@@ -224,7 +236,7 @@ android:
   # All other options supported by the AndroidDevice constructor
   # For example: androidAdbPath, remoteAdbHost, remoteAdbPort,
   # imeStrategy, displayId, autoDismissKeyboard, keyboardDismissStrategy,
-  # alwaysRefreshScreenInfo, etc.
+  # minScreenshotBufferSize, alwaysRefreshScreenInfo, etc.
   # See the AndroidDevice constructor documentation for the complete list
 ```
 
@@ -238,7 +250,7 @@ YAML scripts now support all configuration options from the `AndroidDevice` cons
 
 **`runAdbShell` - Execute ADB Shell Commands**
 
-Execute ADB shell commands on Android devices.
+Execute ADB shell commands on Android devices. Pass only the shell command itself, without the `adb shell` prefix. To set a command timeout, keep `timeout` as a shallow sibling of `runAdbShell`.
 
 ```yaml
 android:
@@ -252,6 +264,15 @@ tasks:
   - name: Get battery info
     flow:
       - runAdbShell: 'dumpsys battery'
+
+  - name: Tap screen coordinates
+    flow:
+      - runAdbShell: 'input tap 100 200'
+
+  - name: Run command with timeout
+    flow:
+      - runAdbShell: 'dumpsys activity services'
+        timeout: 60000
 ```
 
 **Common ADB Shell Commands:**
@@ -259,6 +280,7 @@ tasks:
 - `dumpsys battery` - Get battery information
 - `dumpsys window` - Get window information
 - `settings get secure android_id` - Get device ID
+- `input tap <x> <y>` - Tap screen coordinates
 - `input keyevent <keycode>` - Send key events
 
 **`launch` - Launch App or URL**
@@ -396,6 +418,79 @@ tasks:
       - terminate: com.apple.Preferences
 ```
 
+### The `harmony` part
+
+The `harmony` section is used for HarmonyOS device automation via HDC. The device is connected with `hdc`, so make sure `hdc list targets` reports your device before running.
+
+```yaml
+harmony:
+  # The HarmonyOS device ID to connect to, optional, defaults to the first connected device.
+  deviceId: <device-id>
+
+  # The app to launch, optional, defaults to the device's current screen.
+  launch: <bundle-name>
+
+  # The path to the HDC executable, optional.
+  hdcPath: <path-to-hdc>
+
+  # Whether to auto dismiss keyboard after input, optional, defaults to false.
+  autoDismissKeyboard: <boolean>
+
+  # Custom mapping of app names to bundle names, optional. User-provided mappings take precedence over defaults.
+  appNameMapping:
+    <app-name>: <bundle-name>
+
+  # The path to the JSON file for outputting aiQuery/aiAssert results, optional.
+  output: <path-to-output-file>
+
+  # All other options supported by the HarmonyDevice constructor
+```
+
+#### HarmonyOS Platform-Specific Actions
+
+**`launch` - Launch App**
+
+Launch a HarmonyOS app by its bundle name.
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: Launch app
+    flow:
+      - launch: com.example.app
+```
+
+**`terminate` - Terminate App**
+
+Terminate (force-stop) a running HarmonyOS app by bundle name or mapped app name.
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: Terminate app
+    flow:
+      - terminate: com.example.app
+```
+
+**`runHdcShell` - Execute HDC Shell Command**
+
+Execute an HDC shell command on the HarmonyOS device.
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: Dump window info
+    flow:
+      - runHdcShell:
+          command: 'hidumper -s WindowManagerService -a'
+```
+
 ### The `computer` part
 
 The `computer` section is used for PC desktop automation. It allows you to control the desktop environment, including mouse movements, keyboard inputs, and screen queries.
@@ -455,41 +550,43 @@ tasks:
       # Perform an interaction. `ai` is a shorthand for `aiAct`.
       - ai: <prompt>
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
-        deepThink: <boolean> # Optional, enable deep thinking for planning when the model supports it (depends on MIDSCENE_MODEL_FAMILY). Default is undefined and follows the model provider's default strategy.
+        deepThink: <boolean> # Optional, guide aiAct to focus on task decomposition and separate planning from UI element locating. Defaults to false.
+        deepLocate: <boolean> # Optional, enable Deep Locate for UI element locating during aiAct execution. Defaults to false.
 
       # This usage is the same as `ai`.
       # Note: In earlier versions, this was also written as `aiAction`. The current version supports both names.
       - aiAct: <prompt>
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
-        deepThink: <boolean> # Optional, enable deep thinking for planning when the model supports it (depends on MIDSCENE_MODEL_FAMILY). Default is undefined and follows the model provider's default strategy.
+        deepThink: <boolean> # Optional, guide aiAct to focus on task decomposition and separate planning from UI element locating. Defaults to false.
+        deepLocate: <boolean> # Optional, enable Deep Locate for UI element locating during aiAct execution. Defaults to false.
 
       # Instant Action (.aiTap, .aiHover, .aiInput, .aiKeyboardPress, .aiScroll)
       # ----------------
 
       # Tap an element described by a prompt.
       - aiTap: <prompt>
-        deepThink: <boolean> # Optional, whether to use deepThink to precisely locate the element. Defaults to False.
+        deepLocate: <boolean> # Optional, whether to enable Deep Locate for this element. Defaults to False.
         xpath: <xpath> # Optional, the xpath of the target element for the operation. If provided, Midscene will prioritize this xpath to find the element before using the cache and the AI model. Defaults to empty.
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
         fileChooserAccept: <path> | [<path1>, <path2>] # Optional, file path(s) to upload when the tap triggers a file chooser; only available on web
 
       # Hover over an element described by a prompt.
       - aiHover: <prompt>
-        deepThink: <boolean> # Optional, whether to use deepThink to precisely locate the element. Defaults to False.
+        deepLocate: <boolean> # Optional, whether to enable Deep Locate for this element. Defaults to False.
         xpath: <xpath> # Optional, the xpath of the target element for the operation. If provided, Midscene will prioritize this xpath to find the element before using the cache and the AI model. Defaults to empty.
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
 
       # Input text into an element described by a prompt.
       - aiInput: <prompt> # The element to input text into.
         value: <final text content of the input>
-        deepThink: <boolean> # Optional, whether to use deepThink to precisely locate the element. Defaults to False.
+        deepLocate: <boolean> # Optional, whether to enable Deep Locate for this element. Defaults to False.
         xpath: <xpath> # Optional, the xpath of the target element for the operation. If provided, Midscene will prioritize this xpath to find the element before using the cache and the AI model. Defaults to empty.
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
 
       # Press a key (e.g., Enter, Tab, Escape) on an element described by a prompt.
       - aiKeyboardPress: <prompt> # The element to press the key on.
         keyName: <key>
-        deepThink: <boolean> # Optional, whether to use deepThink to precisely locate the element. Defaults to False.
+        deepLocate: <boolean> # Optional, whether to enable Deep Locate for this element. Defaults to False.
         xpath: <xpath> # Optional, the xpath of the target element for the operation. If provided, Midscene will prioritize this xpath to find the element before using the cache and the AI model. Defaults to empty.
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
 
@@ -498,7 +595,7 @@ tasks:
         scrollType: 'singleAction' # or 'scrollToBottom' | 'scrollToTop' | 'scrollToRight' | 'scrollToLeft'. Defaults to 'singleAction'.
         direction: 'down' # or 'up' | 'left' | 'right'. Defaults to 'down'. Only effective when scrollType is singleAction.
         distance: <number> # Optional, the scroll distance in pixels. Use null to let Midscene decide automatically.
-        deepThink: <boolean> # Optional, whether to use deepThink to precisely locate the element. Defaults to False.
+        deepLocate: <boolean> # Optional, whether to enable Deep Locate for this element. Defaults to False.
         xpath: <xpath> # Optional, the xpath of the target element for the operation. If provided, Midscene will prioritize this xpath to find the element before using the cache and the AI model. Defaults to empty.
         cacheable: <boolean> # Optional, whether to cache the result of this API call when the [caching feature](./caching.mdx) is enabled. Defaults to True.
 
@@ -525,6 +622,13 @@ tasks:
         errorMessage: <error-message> # Optional, the error message to print if the assertion fails.
         name: <name> # Optional, give the assertion a name, which will be used as a key in the JSON output.
 
+      # Run one Gherkin Scenario. This is a Beta feature available starting in Midscene 1.10.
+      - runGherkinScenario: |
+          Scenario: Add a todo item
+            Given the todo page is open
+            When I add a todo item named "Buy milk"
+            Then the todo list should contain "Buy milk"
+
       # Wait for a specified amount of time.
       - sleep: <ms>
 
@@ -535,6 +639,23 @@ tasks:
   - name: <name>
     flow:
       # ...
+```
+
+`runGherkinScenario` is a Beta feature available starting in Midscene 1.10. For supported rules and limitations, see [BDD-style scripts with Gherkin](./advanced/bdd-style-scripts-with-gherkin).
+
+#### Step Result Names
+
+Steps that write a result with `name` save that value into the YAML run result and the JSON output. Use `name` to label values that should appear in the run output.
+
+```yaml
+tasks:
+  - name: Save extracted data
+    flow:
+      - aiString: Get the product id shown on the page
+        name: product_id
+
+      - aiQuery: Get the search result after submitting the product id
+        name: search_result
 ```
 
 #### Upload Files With `aiTap`
@@ -570,9 +691,10 @@ tasks:
 
 Notes:
 
-- `fileChooserAccept` is only available for web pages (Playwright, Puppeteer).
+- `fileChooserAccept` is only available for web pages (Playwright, Puppeteer, or Chrome extension Bridge mode).
 - Relative paths are resolved from the current command working directory, not from the YAML file directory.
 - If a file does not exist, the script throws before the tap is executed.
+- Chrome extension Bridge mode does not support directory upload inputs (`webkitdirectory` / `directory`). Use Playwright for directory uploads.
 
 #### Prompting with images
 

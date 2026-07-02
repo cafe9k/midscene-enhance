@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { defineConfig } from 'vitest/config';
+import { createCoverageConfig } from '../../scripts/vitest-coverage';
 
 export default defineConfig({
   root: __dirname,
@@ -9,7 +10,8 @@ export default defineConfig({
     },
   },
   test: {
+    coverage: createCoverageConfig(__dirname),
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['tests/**/*.test.ts', 'src/**/*.test.ts'],
   },
 });

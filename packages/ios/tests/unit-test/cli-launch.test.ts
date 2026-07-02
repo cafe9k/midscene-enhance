@@ -1,7 +1,7 @@
 import { runToolsCLI } from '@midscene/shared/cli';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agentFromWebDriverAgent } from '../../src/agent';
-import { IOSMidsceneTools } from '../../src/mcp-tools';
+import { IOSMidsceneTools } from '../../src/agent-tools';
 
 // Mock the agent entry point only. IOSDevice is intentionally NOT mocked so
 // that the real actionSpace (including Launch/Terminate) reaches the tool
@@ -64,6 +64,35 @@ describe('midscene-ios CLI argv path for launch/terminate (issue #2313)', () => 
     expect(mockAgent.callActionInActionSpace).toHaveBeenCalledWith(
       'Launch',
       expect.objectContaining({ uri: 'com.apple.Preferences' }),
+    );
+  });
+
+  it('passes external WDA session args through `connect`', async () => {
+    vi.mocked(agentFromWebDriverAgent).mockResolvedValue(
+      createMockAgent() as any,
+    );
+
+    await runToolsCLI(new IOSMidsceneTools(), 'midscene-ios', {
+      stripPrefix: 'ios_',
+      version: '0.0.0-test',
+      argv: [
+        'connect',
+        '--wda-host',
+        '127.0.0.1',
+        '--wda-port',
+        '8100',
+        '--session-id',
+        'external-session-id',
+      ],
+    });
+
+    expect(agentFromWebDriverAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        autoDismissKeyboard: false,
+        wdaHost: '127.0.0.1',
+        wdaPort: 8100,
+        sessionId: 'external-session-id',
+      }),
     );
   });
 

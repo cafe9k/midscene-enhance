@@ -6,13 +6,20 @@ import {
 } from '@yume-chan/scrcpy-decoder-webcodecs';
 import { Alert, Spin, Typography } from 'antd';
 import React, {
+  type CSSProperties,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from 'react';
+
+// Esbuild leaves `.tsx` on the classic JSX transform here (tsconfig sets
+// `jsx: preserve`), so JSX in this file compiles to `React.createElement`.
+// Keep a runtime reference to React or biome will strip the import as
+// type-only, breaking SSR/test renders.
+void React;
 import type { Socket } from 'socket.io-client';
 import { io } from 'socket.io-client';
 import {
@@ -42,11 +49,25 @@ export type ScrcpyErrorOverlayRenderer = (
 interface ScrcpyPanelProps {
   connectingOverlay?: ReactNode;
   deviceId?: string;
+  /**
+   * Fires when the underlying video stream's intrinsic resolution is
+   * known (scrcpy `video-metadata` event), and again with `null` when
+   * the stream tears down. Use this as the source of truth for any
+   * surrounding aspect-ratio calculations — it always matches the
+   * canvas's pixel buffer, unlike `/interface-info.size` which can
+   * drift from the actual stream dimensions by a few pixels.
+   */
+  onIntrinsicSize?: (size: { width: number; height: number } | null) => void;
   onStatusChange?: (status: ScrcpyPreviewStatus, statusText: string) => void;
   renderErrorOverlay?: ScrcpyErrorOverlayRenderer;
   serverUrl?: string;
   metadataTimeoutMs?: number;
   reconnectInterval?: number;
+  viewportStyle?: CSSProperties;
+  // Receives the canvas-area wrapper so the device-interaction layer can
+  // project pointer coords against the actual stream box, ignoring any
+  // surrounding Alert / status chrome.
+  contentRef?: React.Ref<HTMLDivElement>;
 }
 
 interface VideoMetadata {
@@ -58,11 +79,14 @@ interface VideoMetadata {
 export function ScrcpyPanel({
   connectingOverlay,
   deviceId,
+  onIntrinsicSize,
   onStatusChange,
   renderErrorOverlay,
   serverUrl,
   metadataTimeoutMs = SCRCPY_METADATA_TIMEOUT_MS,
   reconnectInterval = 3000,
+  viewportStyle,
+  contentRef,
 }: ScrcpyPanelProps) {
   const canvasStageRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -160,6 +184,7 @@ export function ScrcpyPanel({
 
       disposeDecoder();
       clearCanvas();
+      onIntrinsicSize?.(null);
     };
 
     const scheduleReconnect = () => {
@@ -252,6 +277,17 @@ export function ScrcpyPanel({
           clearMetadataTimeout();
           disposeDecoder();
           setWaitingStatusMessage(getScrcpyDecoderStatusText());
+          if (
+            typeof metadata.width === 'number' &&
+            metadata.width > 0 &&
+            typeof metadata.height === 'number' &&
+            metadata.height > 0
+          ) {
+            onIntrinsicSize?.({
+              width: metadata.width,
+              height: metadata.height,
+            });
+          }
           const codecId = metadata.codec
             ? (metadata.codec as unknown as ScrcpyVideoCodecId)
             : ScrcpyVideoCodecId.H264;
@@ -346,6 +382,7 @@ export function ScrcpyPanel({
         />
       ) : null}
       <div
+        ref={contentRef}
         style={{
           position: 'relative',
           flex: 1,
@@ -356,6 +393,7 @@ export function ScrcpyPanel({
           background: '#111827',
           borderRadius: 8,
           overflow: 'hidden',
+          ...viewportStyle,
         }}
       >
         <div

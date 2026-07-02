@@ -1,7 +1,24 @@
-import { useStudioTheme } from '../../theme/ThemeProvider';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { UpdateStatus } from '../../../shared/updater-contract';
+import {
+  type StudioThemeMode,
+  useStudioTheme,
+} from '../../theme/ThemeProvider';
 import SettingItem from './SettingItem';
+import UpdaterSection from './UpdaterSection';
 
-const THEME_LABELS: Record<string, string> = {
+const LANGUAGE_STORAGE_KEY = 'studio.language';
+const LANGUAGE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'en', label: 'English' },
+  { value: 'zh', label: '中文' },
+];
+const THEME_OPTIONS: { value: StudioThemeMode; label: string }[] = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' },
+];
+
+const THEME_LABELS: Record<StudioThemeMode, string> = {
   light: 'Light',
   dark: 'Dark',
   system: 'System',
@@ -21,6 +38,25 @@ function ChevronIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-[12px] w-[12px] text-text-primary"
+      fill="none"
+      viewBox="0 0 12 12"
+    >
+      <path
+        d="M2.5 6L5 8.5L9.5 3.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
       />
     </svg>
   );
@@ -59,74 +95,195 @@ function ExternalLinkIcon() {
   );
 }
 
+interface OptionListProps<T extends string> {
+  options: { value: T; label: string }[];
+  selected: T;
+  onSelect: (value: T) => void;
+}
+
+function OptionList<T extends string>({
+  options,
+  selected,
+  onSelect,
+}: OptionListProps<T>) {
+  return (
+    <div className="flex w-[160px] flex-col rounded-[10px] border border-border-subtle bg-surface-elevated p-[4px] shadow-lg">
+      {options.map((option) => {
+        const isSelected = option.value === selected;
+        return (
+          <button
+            className={`flex h-[32px] cursor-pointer items-center justify-between rounded-[8px] border-0 px-[8px] text-left ${
+              isSelected
+                ? 'bg-surface-hover'
+                : 'bg-transparent hover:bg-surface-hover'
+            }`}
+            key={option.value}
+            onClick={() => onSelect(option.value)}
+            type="button"
+          >
+            <span className="overflow-hidden whitespace-nowrap font-sans text-[13px] leading-[22px] text-text-secondary">
+              {option.label}
+            </span>
+            {isSelected ? <CheckIcon /> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function readStoredLanguage(): string {
+  if (typeof window === 'undefined') {
+    return LANGUAGE_OPTIONS[0].value;
+  }
+  const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+  return LANGUAGE_OPTIONS.some((option) => option.value === stored)
+    ? (stored as string)
+    : LANGUAGE_OPTIONS[0].value;
+}
+
 export interface SettingsPanelProps {
   className?: string;
-  language?: string;
-  onEnvConfigClick?: () => void;
   onGithubClick?: () => void;
-  onLanguageClick?: () => void;
-  onThemeClick?: () => void;
+  /** Fires after the user picks a theme so the parent can dismiss the
+   * popover — the new theme is hidden behind the popover otherwise. */
+  onThemeChange?: () => void;
   onWebsiteClick?: () => void;
+  updater?: {
+    status: UpdateStatus;
+    appVersion: string | null;
+    onDownload: () => void;
+    onInstall: () => void;
+    onOpenDownloadPage?: () => void;
+  };
 }
 
 export default function SettingsPanel({
   className,
-  language = 'English',
-  onEnvConfigClick,
   onGithubClick,
-  onLanguageClick,
-  onThemeClick,
+  onThemeChange,
   onWebsiteClick,
+  updater,
 }: SettingsPanelProps) {
-  const { mode, cycleMode } = useStudioTheme();
-  const panelClassName = [
-    'flex h-[220px] w-[244px] flex-col overflow-hidden rounded-[12px] border border-border-subtle bg-surface-elevated p-[6px] shadow-lg',
-    className,
-  ]
-    .filter(Boolean)
-    .join(' ');
+  const { mode, setMode } = useStudioTheme();
+  // Language preference is persisted but not surfaced yet; the row is
+  // hidden until i18n actually ships. Keep the storage hook so a stored
+  // value survives the round-trip when the row returns.
+  const [language] = useState<string>(() => readStoredLanguage());
+  const [openPopover, setOpenPopover] = useState<'theme' | null>(null);
+  const popoverWrapperRef = useRef<HTMLDivElement | null>(null);
+  // The Theme popover is hover-driven now. A 4px gap separates the trigger
+  // row from the floating option list, so we use a short grace period
+  // before closing — letting the cursor cross the gap without flicker.
+  const closeTimerRef = useRef<number | null>(null);
+
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleClose = useCallback(() => {
+    cancelScheduledClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpenPopover(null);
+      closeTimerRef.current = null;
+    }, 120);
+  }, [cancelScheduledClose]);
+
+  useEffect(() => () => cancelScheduledClose(), [cancelScheduledClose]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+  }, [language]);
+
+  useEffect(() => {
+    if (!openPopover) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      const wrapper = popoverWrapperRef.current;
+      if (
+        wrapper &&
+        event.target instanceof Node &&
+        wrapper.contains(event.target)
+      ) {
+        return;
+      }
+      setOpenPopover(null);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [openPopover]);
+
+  const wrapperClassName = ['relative', className].filter(Boolean).join(' ');
 
   return (
-    <div className={panelClassName}>
-      <div className="flex flex-col">
-        <SettingItem
-          label="Language"
-          onClick={onLanguageClick}
-          trailingIcon={<ChevronIcon />}
-          value={language}
-        />
-        <SettingItem
-          label="Theme"
-          onClick={cycleMode}
-          trailingIcon={<ChevronIcon />}
-          value={THEME_LABELS[mode]}
-        />
+    <div className={wrapperClassName} ref={popoverWrapperRef}>
+      <div className="flex w-[244px] flex-col rounded-[12px] border border-border-subtle bg-surface-elevated p-[6px] shadow-lg">
+        <div className="flex flex-col">
+          <SettingItem
+            label="Theme"
+            onMouseEnter={() => {
+              cancelScheduledClose();
+              setOpenPopover('theme');
+            }}
+            onMouseLeave={scheduleClose}
+            trailingIcon={<ChevronIcon />}
+            value={THEME_LABELS[mode]}
+          />
+        </div>
+
+        <div className="my-[4px] h-px w-full bg-divider" />
+
+        <div className="flex flex-col">
+          <SettingItem
+            label="GitHub"
+            onClick={onGithubClick}
+            trailingIcon={<ExternalLinkIcon />}
+          />
+          <SettingItem
+            label="Website"
+            onClick={onWebsiteClick}
+            trailingIcon={<ExternalLinkIcon />}
+          />
+        </div>
+
+        {updater ? (
+          <>
+            <div className="my-[4px] h-px w-full bg-divider" />
+            <UpdaterSection
+              appVersion={updater.appVersion}
+              onDownload={updater.onDownload}
+              onInstall={updater.onInstall}
+              onOpenDownloadPage={updater.onOpenDownloadPage}
+              status={updater.status}
+            />
+          </>
+        ) : null}
       </div>
 
-      <div className="my-[4px] h-px w-full bg-divider" />
-
-      <div className="flex flex-col">
-        <SettingItem
-          label="GitHub"
-          onClick={onGithubClick}
-          trailingIcon={<ExternalLinkIcon />}
-        />
-        <SettingItem
-          label="Website"
-          onClick={onWebsiteClick}
-          trailingIcon={<ExternalLinkIcon />}
-        />
-      </div>
-
-      <div className="my-[4px] h-px w-full bg-divider" />
-
-      <div className="flex flex-col">
-        <SettingItem
-          label="Environment"
-          onClick={onEnvConfigClick}
-          trailingIcon={<ChevronIcon />}
-        />
-      </div>
+      {openPopover === 'theme' ? (
+        <div
+          className="absolute left-[calc(100%+4px)] top-[6px] z-50"
+          onMouseEnter={cancelScheduledClose}
+          onMouseLeave={scheduleClose}
+        >
+          <OptionList
+            onSelect={(value) => {
+              setMode(value);
+              setOpenPopover(null);
+              onThemeChange?.();
+            }}
+            options={THEME_OPTIONS}
+            selected={mode}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

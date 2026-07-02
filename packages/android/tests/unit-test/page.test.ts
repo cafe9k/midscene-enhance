@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import type { ExecutorContext } from '@midscene/core';
 import * as CoreUtils from '@midscene/core/utils';
 import * as ImgUtils from '@midscene/shared/img';
 import { ADB } from 'appium-adb';
@@ -16,6 +17,10 @@ import { AndroidDevice, escapeForShell } from '../../src/device';
 
 // Mock the entire appium-adb module
 const createMockAdb = () => ({
+  EXEC_OUTPUT_FORMAT: {
+    FULL: 'full',
+    STDOUT: 'stdout',
+  },
   startUri: vi.fn(),
   startApp: vi.fn(),
   activateApp: vi.fn(),
@@ -33,6 +38,12 @@ const createMockAdb = () => ({
 
 let mockAdbInstance: ReturnType<typeof createMockAdb>;
 
+const createValidPngBuffer = (size = 64) =>
+  Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(Math.max(size - 8, 0)),
+  ]);
+
 vi.mock('appium-adb', () => {
   return {
     ADB: vi.fn(() => {
@@ -45,7 +56,40 @@ vi.mock('appium-adb', () => {
 });
 
 vi.mock('@midscene/core/utils');
-vi.mock('@midscene/shared/img');
+vi.mock('@midscene/shared/img', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@midscene/shared/img')>();
+  const validateScreenshotBuffer =
+    original.validateScreenshotBuffer ??
+    ((
+      screenshotBuffer: Buffer | undefined,
+      options: {
+        label: string;
+        minBufferSize?: number;
+      },
+    ) => {
+      const bufferSize = screenshotBuffer?.length ?? 0;
+      if (!screenshotBuffer || bufferSize === 0) {
+        throw new Error(
+          `${options.label} validation failed: buffer size ${bufferSize} bytes`,
+        );
+      }
+      if (!original.isValidImageBuffer(screenshotBuffer)) {
+        throw new Error(`${options.label} buffer has invalid image format`);
+      }
+      if (options.minBufferSize && bufferSize < options.minBufferSize) {
+        throw new Error(
+          `${options.label} validation failed: buffer size ${bufferSize} bytes (minimum: ${options.minBufferSize})`,
+        );
+      }
+    });
+  return {
+    ...original,
+    createImgBase64ByFormat: vi.fn(),
+    resizeAndConvertImgBuffer: vi.fn(),
+    validateScreenshotBuffer,
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const original = (await importOriginal()) as {
     default: Record<string, unknown>;
@@ -176,6 +220,112 @@ describe('AndroidDevice', () => {
     });
   });
 
+  describe('RunAdbShell action output', () => {
+    it('should expose non-empty stdout as planning feedback', async () => {
+      const command = 'settings get system screen_brightness';
+      mockAdb.shell.mockResolvedValue({
+        stdout: '0\n',
+        stderr: '',
+      } as any);
+
+      const runAdbShellAction = device
+        .actionSpace()
+        .find((action) => action.name === 'RunAdbShell');
+      const taskContext: { task: { planningFeedback?: string } } = {
+        task: {},
+      };
+      await runAdbShellAction!.call(
+        { command },
+        taskContext as ExecutorContext,
+      );
+
+      expect(taskContext.task).toEqual({
+        planningFeedback: `Command: ${command}
+Stdout:
+0
+`,
+      });
+    });
+
+    it('should omit planning feedback for empty stdout', async () => {
+      const command = 'cmd clipboard set-text "Tracking #: 5K672F4C"';
+      mockAdb.shell.mockResolvedValue({
+        stdout: '',
+        stderr: '',
+      } as any);
+
+      const runAdbShellAction = device
+        .actionSpace()
+        .find((action) => action.name === 'RunAdbShell');
+      const taskContext: { task: { planningFeedback?: string } } = {
+        task: {},
+      };
+      await runAdbShellAction!.call(
+        { command },
+        taskContext as ExecutorContext,
+      );
+
+      expect(taskContext.task).toEqual({});
+    });
+
+    it('should pass full stdout into planning feedback (core handles truncation)', async () => {
+      const command = 'cmd test';
+      mockAdb.shell.mockResolvedValue({
+        stdout: 'o'.repeat(240),
+        stderr: '',
+      } as any);
+
+      const runAdbShellAction = device
+        .actionSpace()
+        .find((action) => action.name === 'RunAdbShell');
+      const taskContext: { task: { planningFeedback?: string } } = {
+        task: {},
+      };
+      await runAdbShellAction!.call(
+        { command },
+        taskContext as ExecutorContext,
+      );
+
+      expect(taskContext.task.planningFeedback).toContain('o'.repeat(240));
+      expect(taskContext.task.planningFeedback).not.toContain('truncated');
+    });
+
+    it('should return stdout without requiring executor context', async () => {
+      const command = 'settings get system screen_brightness';
+      mockAdb.shell.mockResolvedValue({
+        stdout: '0\n',
+        stderr: '',
+      } as any);
+
+      const runAdbShellAction = device
+        .actionSpace()
+        .find((action) => action.name === 'RunAdbShell');
+
+      await expect(runAdbShellAction!.call({ command })).resolves.toBe('0\n');
+    });
+
+    it('should throw when adb shell exits zero with stderr output', async () => {
+      const command = 'cmd clipboard set-text "Tracking #: 5K672F4C"';
+      mockAdb.shell.mockResolvedValue({
+        stdout: '',
+        stderr: 'No shell command implementation.',
+      } as any);
+
+      const runAdbShellAction = device
+        .actionSpace()
+        .find((action) => action.name === 'RunAdbShell');
+
+      await expect(
+        runAdbShellAction!.call({ command }, {} as ExecutorContext),
+      ).rejects.toThrow(
+        /RunAdbShell command returned stderr\.[\s\S]*No shell command implementation\./,
+      );
+      expect(mockAdb.shell).toHaveBeenCalledWith(command, {
+        outputFormat: 'full',
+      });
+    });
+  });
+
   describe('size', () => {
     it('should calculate screen size', async () => {
       vi.spyOn(device as any, 'getScreenSize').mockResolvedValue({
@@ -232,7 +382,7 @@ describe('AndroidDevice', () => {
       expect(adjusted).toEqual({ x: 300, y: 600 });
     });
 
-    it('mouseClick should use correct physical coordinates when size() is overridden', async () => {
+    it('pointer tap primitive should use correct physical coordinates when size() is overridden', async () => {
       // Physical 1080x1920, logical 540x960 → scale 0.5
       // click at (100, 200) → physical (200, 400)
       mockPhysicalInfo(1080, 1920);
@@ -241,7 +391,7 @@ describe('AndroidDevice', () => {
         height: 960,
       });
 
-      await device.mouseClick(100, 200);
+      await device.inputPrimitives.pointer.tap({ x: 100, y: 200 });
       expect(mockAdb.shell).toHaveBeenCalledWith(
         'input swipe 200 400 200 400 150',
       );
@@ -345,7 +495,6 @@ describe('AndroidDevice', () => {
         width: 1080,
         height: 1920,
       });
-      vi.spyOn(ImgUtils, 'isValidImageBuffer').mockReturnValue(true);
       vi.spyOn(ImgUtils, 'resizeAndConvertImgBuffer').mockImplementation(
         async (format, buffer) => ({
           buffer,
@@ -355,7 +504,7 @@ describe('AndroidDevice', () => {
     });
 
     it('should take screenshot successfully with takeScreenshot', async () => {
-      const mockBuffer = Buffer.from('test-screenshot');
+      const mockBuffer = createValidPngBuffer();
       mockAdb.takeScreenshot.mockResolvedValue(mockBuffer);
 
       // Mock createImgBase64ByFormat
@@ -370,7 +519,7 @@ describe('AndroidDevice', () => {
 
     it('should fall back to screencap and pull if takeScreenshot fails', async () => {
       mockAdb.takeScreenshot.mockRejectedValue(new Error('fail'));
-      const mockBuffer = Buffer.from('fallback-screenshot');
+      const mockBuffer = createValidPngBuffer();
       vi.spyOn(CoreUtils, 'getTmpFile').mockReturnValue('/tmp/test.png');
       (fs.promises.readFile as Mock).mockResolvedValue(mockBuffer);
 
@@ -389,6 +538,67 @@ describe('AndroidDevice', () => {
       expect(result).toContain(mockBuffer.toString('base64'));
       // rm is now executed via execFile (fire-and-forget), not adb.shell
     });
+
+    it('should accept valid fallback screenshots larger than 1KB by default', async () => {
+      const defaultDevice = new AndroidDevice('test-device', {
+        scrcpyConfig: { enabled: false },
+      });
+      vi.spyOn(defaultDevice, 'getAdb').mockResolvedValue(mockAdb);
+      mockAdb.takeScreenshot.mockRejectedValue(new Error('fail'));
+      const smallValidPng = createValidPngBuffer(7 * 1024);
+      vi.spyOn(CoreUtils, 'getTmpFile').mockReturnValue('/tmp/small.png');
+      (fs.promises.readFile as Mock).mockResolvedValue(smallValidPng);
+
+      vi.spyOn(ImgUtils, 'createImgBase64ByFormat').mockReturnValue(
+        `data:image/png;base64,${smallValidPng.toString('base64')}`,
+      );
+
+      const result = await defaultDevice.screenshotBase64();
+
+      expect(result).toContain(smallValidPng.toString('base64'));
+      expect(mockAdb.pull).toHaveBeenCalled();
+    });
+
+    it('should reject valid fallback screenshots smaller than 1KB by default', async () => {
+      const defaultDevice = new AndroidDevice('test-device', {
+        scrcpyConfig: { enabled: false },
+      });
+      vi.spyOn(defaultDevice, 'getAdb').mockResolvedValue(mockAdb);
+      mockAdb.takeScreenshot.mockRejectedValue(new Error('fail'));
+      const tinyValidPng = createValidPngBuffer(512);
+      vi.spyOn(CoreUtils, 'getTmpFile').mockReturnValue('/tmp/tiny.png');
+      (fs.promises.readFile as Mock).mockResolvedValue(tinyValidPng);
+
+      await expect(defaultDevice.screenshotBase64()).rejects.toThrow(
+        'Fallback screenshot validation failed: buffer size 512 bytes (minimum: 1024)',
+      );
+    });
+
+    it('should reject empty fallback screenshots', async () => {
+      mockAdb.takeScreenshot.mockRejectedValue(new Error('fail'));
+      vi.spyOn(CoreUtils, 'getTmpFile').mockReturnValue('/tmp/empty.png');
+      (fs.promises.readFile as Mock).mockResolvedValue(Buffer.alloc(0));
+
+      await expect(device.screenshotBase64()).rejects.toThrow(
+        'Fallback screenshot validation failed: buffer size 0 bytes',
+      );
+    });
+
+    it('should enforce minScreenshotBufferSize when explicitly configured', async () => {
+      const minSizeDevice = new AndroidDevice('test-device', {
+        minScreenshotBufferSize: 10 * 1024,
+        scrcpyConfig: { enabled: false },
+      });
+      vi.spyOn(minSizeDevice, 'getAdb').mockResolvedValue(mockAdb);
+      mockAdb.takeScreenshot.mockRejectedValue(new Error('fail'));
+      const smallValidPng = createValidPngBuffer(7 * 1024);
+      vi.spyOn(CoreUtils, 'getTmpFile').mockReturnValue('/tmp/small.png');
+      (fs.promises.readFile as Mock).mockResolvedValue(smallValidPng);
+
+      await expect(minSizeDevice.screenshotBase64()).rejects.toThrow(
+        'Fallback screenshot validation failed: buffer size 7168 bytes (minimum: 10240)',
+      );
+    });
   });
 
   describe('mouse', () => {
@@ -397,7 +607,7 @@ describe('AndroidDevice', () => {
         x: 200,
         y: 300,
       });
-      await device.mouseClick(100, 150);
+      await device.inputPrimitives.pointer.tap({ x: 100, y: 150 });
       expect(mockAdb.shell).toHaveBeenCalledWith(
         'input swipe 200 300 200 300 150',
       );
@@ -409,7 +619,7 @@ describe('AndroidDevice', () => {
       vi.spyOn(device as any, 'adjustCoordinates')
         .mockResolvedValueOnce({ x: 20, y: 40 })
         .mockResolvedValueOnce({ x: 60, y: 80 });
-      await device.mouseDrag(from, to);
+      await device.inputPrimitives.pointer.dragAndDrop(from, to);
       expect(mockAdb.shell).toHaveBeenCalledWith(
         'input swipe 20 40 60 80 1000',
       );
@@ -571,7 +781,7 @@ describe('AndroidDevice', () => {
       });
 
       it('should return early for empty string', async () => {
-        await device.keyboardType('');
+        await device.inputPrimitives.keyboard.typeText('');
         expect(mockAdb.inputText).not.toHaveBeenCalled();
         expect((device as any).execYadb).not.toHaveBeenCalled();
       });
@@ -581,13 +791,13 @@ describe('AndroidDevice', () => {
       // ---------------------------------------------------------------
       describe('inputText path — appium-adb compatible characters', () => {
         it('pure ASCII: hello', async () => {
-          await device.keyboardType('hello');
+          await device.inputPrimitives.keyboard.typeText('hello');
           expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
 
         it('space: hello world', async () => {
-          await device.keyboardType('hello world');
+          await device.inputPrimitives.keyboard.typeText('hello world');
           expect(mockAdb.inputText).toHaveBeenCalledWith('hello world');
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
@@ -607,7 +817,7 @@ describe('AndroidDevice', () => {
           for (const text of texts) {
             mockAdb.inputText.mockClear();
             (device as any).execYadb.mockClear();
-            await device.keyboardType(text);
+            await device.inputPrimitives.keyboard.typeText(text);
             expect(mockAdb.inputText).toHaveBeenCalledWith(text);
             expect((device as any).execYadb).not.toHaveBeenCalled();
           }
@@ -617,7 +827,7 @@ describe('AndroidDevice', () => {
           for (const text of ['a{b}c', 'a[b]c']) {
             mockAdb.inputText.mockClear();
             (device as any).execYadb.mockClear();
-            await device.keyboardType(text);
+            await device.inputPrimitives.keyboard.typeText(text);
             expect(mockAdb.inputText).toHaveBeenCalledWith(text);
             expect((device as any).execYadb).not.toHaveBeenCalled();
           }
@@ -637,26 +847,26 @@ describe('AndroidDevice', () => {
           for (const text of texts) {
             mockAdb.inputText.mockClear();
             (device as any).execYadb.mockClear();
-            await device.keyboardType(text);
+            await device.inputPrimitives.keyboard.typeText(text);
             expect(mockAdb.inputText).toHaveBeenCalledWith(text);
             expect((device as any).execYadb).not.toHaveBeenCalled();
           }
         });
 
         it("single quote only: it's", async () => {
-          await device.keyboardType("it's");
+          await device.inputPrimitives.keyboard.typeText("it's");
           expect(mockAdb.inputText).toHaveBeenCalledWith("it's");
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
 
         it('double quote only: say"hi"', async () => {
-          await device.keyboardType('say"hi"');
+          await device.inputPrimitives.keyboard.typeText('say"hi"');
           expect(mockAdb.inputText).toHaveBeenCalledWith('say"hi"');
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
 
         it('percent not followed by letter: 100% done', async () => {
-          await device.keyboardType('100% done');
+          await device.inputPrimitives.keyboard.typeText('100% done');
           expect(mockAdb.inputText).toHaveBeenCalledWith('100% done');
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
@@ -670,25 +880,25 @@ describe('AndroidDevice', () => {
         // In single-quote context, only ' needs escaping; \, ", `, $ pass through
         describe('characters routed to yadb with escapeForShell applied', () => {
           it('\\ → execYadb unchanged (no escaping needed in single quotes)', async () => {
-            await device.keyboardType('a\\b');
+            await device.inputPrimitives.keyboard.typeText('a\\b');
             expect((device as any).execYadb).toHaveBeenCalledWith('a\\b');
             expect(mockAdb.inputText).not.toHaveBeenCalled();
           });
 
           it('` → execYadb unchanged', async () => {
-            await device.keyboardType('a`b');
+            await device.inputPrimitives.keyboard.typeText('a`b');
             expect((device as any).execYadb).toHaveBeenCalledWith('a`b');
             expect(mockAdb.inputText).not.toHaveBeenCalled();
           });
 
           it('$ → execYadb unchanged', async () => {
-            await device.keyboardType('$HOME');
+            await device.inputPrimitives.keyboard.typeText('$HOME');
             expect((device as any).execYadb).toHaveBeenCalledWith('$HOME');
             expect(mockAdb.inputText).not.toHaveBeenCalled();
           });
 
           it("both quotes → execYadb with ' escaped", async () => {
-            await device.keyboardType('it\'s a "test"');
+            await device.inputPrimitives.keyboard.typeText('it\'s a "test"');
             expect((device as any).execYadb).toHaveBeenCalledWith(
               "it'\\''s a \"test\"",
             );
@@ -696,7 +906,7 @@ describe('AndroidDevice', () => {
           });
 
           it('combined: $100\\each → unchanged (no escaping needed)', async () => {
-            await device.keyboardType('price: $100\\each');
+            await device.inputPrimitives.keyboard.typeText('price: $100\\each');
             expect((device as any).execYadb).toHaveBeenCalledWith(
               'price: $100\\each',
             );
@@ -706,36 +916,40 @@ describe('AndroidDevice', () => {
         // 3b-2. Routing trigger but escapeForShell does not modify the text
         describe('characters NOT needing escapeForShell (pass through unchanged)', () => {
           it('non-ASCII: Chinese', async () => {
-            await device.keyboardType('你好');
+            await device.inputPrimitives.keyboard.typeText('你好');
             expect((device as any).execYadb).toHaveBeenCalledWith('你好');
           });
 
           it('non-ASCII: Latin Unicode (ö)', async () => {
-            await device.keyboardType('Schönberg,Liechtenstein');
+            await device.inputPrimitives.keyboard.typeText(
+              'Schönberg,Liechtenstein',
+            );
             expect((device as any).execYadb).toHaveBeenCalledWith(
               'Schönberg,Liechtenstein',
             );
           });
 
           it('non-ASCII: emoji', async () => {
-            await device.keyboardType('hello 😀');
+            await device.inputPrimitives.keyboard.typeText('hello 😀');
             expect((device as any).execYadb).toHaveBeenCalledWith('hello 😀');
           });
 
           it('non-ASCII: Japanese', async () => {
-            await device.keyboardType('こんにちは');
+            await device.inputPrimitives.keyboard.typeText('こんにちは');
             expect((device as any).execYadb).toHaveBeenCalledWith('こんにちは');
           });
 
           it('format specifier: %s (yadb does not interpret %)', async () => {
-            await device.keyboardType('Test%sString');
+            await device.inputPrimitives.keyboard.typeText('Test%sString');
             expect((device as any).execYadb).toHaveBeenCalledWith(
               'Test%sString',
             );
           });
 
           it('non-ASCII text preserves space, punctuation; single quote is escaped', async () => {
-            await device.keyboardType("café's menu! @#&|;(){}[]<>~^*?=+,./:-_");
+            await device.inputPrimitives.keyboard.typeText(
+              "café's menu! @#&|;(){}[]<>~^*?=+,./:-_",
+            );
             // Non-ASCII triggers yadb; ' is escaped, everything else passes through
             expect((device as any).execYadb).toHaveBeenCalledWith(
               "café'\\''s menu! @#&|;(){}[]<>~^*?=+,./:-_",
@@ -751,7 +965,7 @@ describe('AndroidDevice', () => {
         // inputText path: split('\n') + keyevent 66
         describe('inputText path — split + keyevent 66', () => {
           it('middle newline: line1\\nline2', async () => {
-            await device.keyboardType('line1\nline2');
+            await device.inputPrimitives.keyboard.typeText('line1\nline2');
             expect(mockAdb.inputText).toHaveBeenCalledTimes(2);
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(1, 'line1');
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(2, 'line2');
@@ -760,7 +974,7 @@ describe('AndroidDevice', () => {
           });
 
           it('multiple newlines: a\\nb\\nc', async () => {
-            await device.keyboardType('a\nb\nc');
+            await device.inputPrimitives.keyboard.typeText('a\nb\nc');
             expect(mockAdb.inputText).toHaveBeenCalledTimes(3);
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(1, 'a');
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(2, 'b');
@@ -769,7 +983,7 @@ describe('AndroidDevice', () => {
           });
 
           it('trailing newline: hello\\n', async () => {
-            await device.keyboardType('hello\n');
+            await device.inputPrimitives.keyboard.typeText('hello\n');
             expect(mockAdb.inputText).toHaveBeenCalledTimes(1);
             expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
             expect(mockAdb.keyevent).toHaveBeenCalledTimes(1);
@@ -777,7 +991,7 @@ describe('AndroidDevice', () => {
           });
 
           it('leading newline: \\nhello', async () => {
-            await device.keyboardType('\nhello');
+            await device.inputPrimitives.keyboard.typeText('\nhello');
             expect(mockAdb.inputText).toHaveBeenCalledTimes(1);
             expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
             expect(mockAdb.keyevent).toHaveBeenCalledTimes(1);
@@ -785,7 +999,7 @@ describe('AndroidDevice', () => {
           });
 
           it('consecutive newlines: a\\n\\nb', async () => {
-            await device.keyboardType('a\n\nb');
+            await device.inputPrimitives.keyboard.typeText('a\n\nb');
             expect(mockAdb.inputText).toHaveBeenCalledTimes(2);
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(1, 'a');
             expect(mockAdb.inputText).toHaveBeenNthCalledWith(2, 'b');
@@ -793,14 +1007,14 @@ describe('AndroidDevice', () => {
           });
 
           it('just a newline: \\n', async () => {
-            await device.keyboardType('\n');
+            await device.inputPrimitives.keyboard.typeText('\n');
             expect(mockAdb.inputText).not.toHaveBeenCalled();
             expect(mockAdb.keyevent).toHaveBeenCalledTimes(1);
             expect(mockAdb.keyevent).toHaveBeenCalledWith(66);
           });
 
           it('no newline → no keyevent', async () => {
-            await device.keyboardType('no-newline');
+            await device.inputPrimitives.keyboard.typeText('no-newline');
             expect(mockAdb.inputText).toHaveBeenCalledWith('no-newline');
             expect(mockAdb.keyevent).not.toHaveBeenCalled();
           });
@@ -809,7 +1023,7 @@ describe('AndroidDevice', () => {
         // yadb path: single execYadb call, \n(0x0A) converted to literal \n
         describe('yadb path — single execYadb call with \\n escaped', () => {
           it('non-ASCII with middle newline: 你好\\nworld', async () => {
-            await device.keyboardType('你好\nworld');
+            await device.inputPrimitives.keyboard.typeText('你好\nworld');
             expect((device as any).execYadb).toHaveBeenCalledTimes(1);
             expect((device as any).execYadb).toHaveBeenCalledWith(
               '你好\\nworld',
@@ -819,7 +1033,9 @@ describe('AndroidDevice', () => {
           });
 
           it('shell-special with middle newline: $10\\ntext', async () => {
-            await device.keyboardType('price: $10\nplain text');
+            await device.inputPrimitives.keyboard.typeText(
+              'price: $10\nplain text',
+            );
             expect((device as any).execYadb).toHaveBeenCalledTimes(1);
             expect((device as any).execYadb).toHaveBeenCalledWith(
               'price: $10\\nplain text',
@@ -829,7 +1045,7 @@ describe('AndroidDevice', () => {
           });
 
           it('non-ASCII trailing newline: 你好\\n', async () => {
-            await device.keyboardType('你好\n');
+            await device.inputPrimitives.keyboard.typeText('你好\n');
             expect((device as any).execYadb).toHaveBeenCalledTimes(1);
             expect((device as any).execYadb).toHaveBeenCalledWith('你好\\n');
             expect(mockAdb.keyevent).not.toHaveBeenCalled();
@@ -840,7 +1056,7 @@ describe('AndroidDevice', () => {
               imeStrategy: 'always-yadb',
               autoDismissKeyboard: false,
             };
-            await device.keyboardType('hello\n');
+            await device.inputPrimitives.keyboard.typeText('hello\n');
             expect((device as any).execYadb).toHaveBeenCalledWith('hello\\n');
             expect(mockAdb.keyevent).not.toHaveBeenCalled();
           });
@@ -850,7 +1066,7 @@ describe('AndroidDevice', () => {
               imeStrategy: 'always-yadb',
               autoDismissKeyboard: false,
             };
-            await device.keyboardType('\nhello');
+            await device.inputPrimitives.keyboard.typeText('\nhello');
             expect((device as any).execYadb).toHaveBeenCalledWith('\\nhello');
           });
 
@@ -859,7 +1075,7 @@ describe('AndroidDevice', () => {
               imeStrategy: 'always-yadb',
               autoDismissKeyboard: false,
             };
-            await device.keyboardType('a\n\nb');
+            await device.inputPrimitives.keyboard.typeText('a\n\nb');
             expect((device as any).execYadb).toHaveBeenCalledWith('a\\n\\nb');
           });
 
@@ -868,7 +1084,7 @@ describe('AndroidDevice', () => {
               imeStrategy: 'always-yadb',
               autoDismissKeyboard: false,
             };
-            await device.keyboardType('\n');
+            await device.inputPrimitives.keyboard.typeText('\n');
             expect((device as any).execYadb).toHaveBeenCalledWith('\\n');
             expect(mockAdb.keyevent).not.toHaveBeenCalled();
           });
@@ -884,7 +1100,7 @@ describe('AndroidDevice', () => {
             imeStrategy: 'always-yadb',
             autoDismissKeyboard: false,
           };
-          await device.keyboardType('hello world');
+          await device.inputPrimitives.keyboard.typeText('hello world');
           expect((device as any).execYadb).toHaveBeenCalledWith('hello world');
           expect(mockAdb.inputText).not.toHaveBeenCalled();
         });
@@ -894,20 +1110,22 @@ describe('AndroidDevice', () => {
             imeStrategy: 'always-yadb',
             autoDismissKeyboard: false,
           };
-          await device.keyboardType('Schönberg,%sLiechtenstein');
+          await device.inputPrimitives.keyboard.typeText(
+            'Schönberg,%sLiechtenstein',
+          );
           expect((device as any).execYadb).toHaveBeenCalledWith(
             'Schönberg,%sLiechtenstein',
           );
         });
 
         it('yadb-for-non-ascii: pure ASCII uses inputText', async () => {
-          await device.keyboardType('hello');
+          await device.inputPrimitives.keyboard.typeText('hello');
           expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
           expect((device as any).execYadb).not.toHaveBeenCalled();
         });
 
         it('yadb-for-non-ascii: non-ASCII uses yadb', async () => {
-          await device.keyboardType('你好,Schönberg');
+          await device.inputPrimitives.keyboard.typeText('你好,Schönberg');
           expect((device as any).execYadb).toHaveBeenCalledWith(
             '你好,Schönberg',
           );
@@ -929,63 +1147,63 @@ describe('AndroidDevice', () => {
           isKeyboardShown: false,
           canCloseKeyboard: true,
         });
-      await device.keyboardType('hello');
+      await device.inputPrimitives.keyboard.typeText('hello');
       expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(111); // ESC key
     });
 
     it('press should call keyevent for mapped keys', async () => {
-      await device.keyboardPress('Enter');
+      await device.inputPrimitives.keyboard.keyboardPress('Enter');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(66);
     });
 
     it('press should handle case-insensitive key names', async () => {
       // Test lowercase keys
-      await device.keyboardPress('enter');
+      await device.inputPrimitives.keyboard.keyboardPress('enter');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(66);
 
-      await device.keyboardPress('escape');
+      await device.inputPrimitives.keyboard.keyboardPress('escape');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(111);
 
-      await device.keyboardPress('tab');
+      await device.inputPrimitives.keyboard.keyboardPress('tab');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(61);
 
       // Test uppercase keys (should still work)
-      await device.keyboardPress('ENTER');
+      await device.inputPrimitives.keyboard.keyboardPress('ENTER');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(66);
 
-      await device.keyboardPress('ESCAPE');
+      await device.inputPrimitives.keyboard.keyboardPress('ESCAPE');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(111);
     });
 
     it('press should handle arrow key variations', async () => {
       // Test full arrow key names (lowercase)
-      await device.keyboardPress('arrowup');
+      await device.inputPrimitives.keyboard.keyboardPress('arrowup');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(19);
 
-      await device.keyboardPress('arrowdown');
+      await device.inputPrimitives.keyboard.keyboardPress('arrowdown');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(20);
 
       // Test short arrow key names
-      await device.keyboardPress('up');
+      await device.inputPrimitives.keyboard.keyboardPress('up');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(19);
 
-      await device.keyboardPress('down');
+      await device.inputPrimitives.keyboard.keyboardPress('down');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(20);
 
-      await device.keyboardPress('left');
+      await device.inputPrimitives.keyboard.keyboardPress('left');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(21);
 
-      await device.keyboardPress('right');
+      await device.inputPrimitives.keyboard.keyboardPress('right');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(22);
     });
 
     it('press should handle common key abbreviations', async () => {
       // Test 'esc' as abbreviation for 'Escape'
-      await device.keyboardPress('esc');
+      await device.inputPrimitives.keyboard.keyboardPress('esc');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(111);
 
-      await device.keyboardPress('ESC');
+      await device.inputPrimitives.keyboard.keyboardPress('ESC');
       expect(mockAdb.keyevent).toHaveBeenCalledWith(111);
     });
 
@@ -1006,7 +1224,7 @@ describe('AndroidDevice', () => {
             canCloseKeyboard: true,
           }); // keyboard hidden after ESC
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
         expect(mockAdb.isSoftKeyboardPresent).toHaveBeenCalled();
@@ -1028,7 +1246,7 @@ describe('AndroidDevice', () => {
             canCloseKeyboard: true,
           }); // keyboard hidden after ESC
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
         expect(mockAdb.isSoftKeyboardPresent).toHaveBeenCalled();
@@ -1043,7 +1261,7 @@ describe('AndroidDevice', () => {
         mockAdb.isSoftKeyboardPresent.mockClear();
         mockAdb.keyevent.mockClear();
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
         expect(mockAdb.isSoftKeyboardPresent).not.toHaveBeenCalled();
@@ -1059,7 +1277,9 @@ describe('AndroidDevice', () => {
         mockAdb.keyevent.mockClear();
 
         // Override with false in method call
-        await device.keyboardType('hello', { autoDismissKeyboard: false });
+        await device.inputPrimitives.keyboard.typeText('hello', {
+          autoDismissKeyboard: false,
+        });
 
         expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
         expect(mockAdb.isSoftKeyboardPresent).not.toHaveBeenCalled();
@@ -1086,7 +1306,7 @@ describe('AndroidDevice', () => {
             canCloseKeyboard: true,
           }); // keyboard hidden after ESC
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.keyevent).toHaveBeenCalledWith(111); // ESC key first
         expect(mockAdb.keyevent).toHaveBeenCalledTimes(1);
@@ -1107,7 +1327,7 @@ describe('AndroidDevice', () => {
             canCloseKeyboard: true,
           }); // keyboard hidden after BACK
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.keyevent).toHaveBeenCalledWith(4); // BACK key first
         expect(mockAdb.keyevent).toHaveBeenCalledTimes(1);
@@ -1172,7 +1392,7 @@ describe('AndroidDevice', () => {
           });
         });
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.keyevent).toHaveBeenNthCalledWith(1, 111); // ESC first
         expect(mockAdb.keyevent).toHaveBeenNthCalledWith(2, 4); // BACK second
@@ -1238,7 +1458,7 @@ describe('AndroidDevice', () => {
           });
         });
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.keyevent).toHaveBeenNthCalledWith(1, 4); // BACK first
         expect(mockAdb.keyevent).toHaveBeenNthCalledWith(2, 111); // ESC second
@@ -1261,7 +1481,8 @@ describe('AndroidDevice', () => {
           }); // keyboard hidden after BACK
 
         // Override with back-first in method call
-        await device.keyboardType('hello', {
+        await device.inputPrimitives.keyboard.typeText('hello', {
+          // @ts-ignore: dist MobileInputPrimitives type has not caught up with AndroidDeviceInputOpt.
           keyboardDismissStrategy: 'back-first',
         });
 
@@ -1290,7 +1511,9 @@ describe('AndroidDevice', () => {
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
         // Should not throw error anymore
-        await device.keyboardType('hello', { autoDismissKeyboard: true });
+        await device.inputPrimitives.keyboard.typeText('hello', {
+          autoDismissKeyboard: true,
+        });
 
         // Verify warning was logged
         expect(warnSpy).toHaveBeenCalledWith(
@@ -1310,7 +1533,7 @@ describe('AndroidDevice', () => {
         }); // keyboard already hidden
         mockAdb.keyevent.mockClear();
 
-        await device.keyboardType('hello');
+        await device.inputPrimitives.keyboard.typeText('hello');
 
         expect(mockAdb.inputText).toHaveBeenCalledWith('hello');
         expect(mockAdb.isSoftKeyboardPresent).toHaveBeenCalled();
@@ -1689,7 +1912,7 @@ describe('AndroidDevice', () => {
 
     describe('scroll methods with calculateScrollEndPoint integration', () => {
       beforeEach(() => {
-        vi.spyOn(device as any, 'mouseDrag').mockResolvedValue(undefined);
+        vi.spyOn(device as any, 'dragPoint').mockResolvedValue(undefined);
         vi.spyOn(console, 'warn').mockImplementation(() => {});
       });
 
@@ -1773,7 +1996,7 @@ describe('AndroidDevice', () => {
         );
       });
 
-      it('scrollDown with startPoint should call mouseDrag with calculated end point', async () => {
+      it('scrollDown with startPoint should call dragPoint with calculated end point', async () => {
         const startPoint = { left: 100, top: 200 };
         const scrollDistance = 300;
         const mockEndPoint = { x: 100, y: 100 }; // Mocked calculated end point
@@ -1784,13 +2007,13 @@ describe('AndroidDevice', () => {
 
         await device.scrollDown(scrollDistance, startPoint);
 
-        expect((device as any).mouseDrag).toHaveBeenCalledWith(
+        expect((device as any).dragPoint).toHaveBeenCalledWith(
           { x: 100, y: 200 },
           mockEndPoint,
         );
       });
 
-      it('scrollUp with startPoint should call mouseDrag with calculated end point', async () => {
+      it('scrollUp with startPoint should call dragPoint with calculated end point', async () => {
         const startPoint = { left: 150, top: 400 };
         const scrollDistance = 200;
         const mockEndPoint = { x: 150, y: 600 }; // Mocked calculated end point
@@ -1801,13 +2024,13 @@ describe('AndroidDevice', () => {
 
         await device.scrollUp(scrollDistance, startPoint);
 
-        expect((device as any).mouseDrag).toHaveBeenCalledWith(
+        expect((device as any).dragPoint).toHaveBeenCalledWith(
           { x: 150, y: 400 },
           mockEndPoint,
         );
       });
 
-      it('scrollLeft with startPoint should call mouseDrag with calculated end point', async () => {
+      it('scrollLeft with startPoint should call dragPoint with calculated end point', async () => {
         const startPoint = { left: 500, top: 300 };
         const scrollDistance = 100;
         const mockEndPoint = { x: 600, y: 300 }; // Mocked calculated end point
@@ -1818,13 +2041,13 @@ describe('AndroidDevice', () => {
 
         await device.scrollLeft(scrollDistance, startPoint);
 
-        expect((device as any).mouseDrag).toHaveBeenCalledWith(
+        expect((device as any).dragPoint).toHaveBeenCalledWith(
           { x: 500, y: 300 },
           mockEndPoint,
         );
       });
 
-      it('scrollRight with startPoint should call mouseDrag with calculated end point', async () => {
+      it('scrollRight with startPoint should call dragPoint with calculated end point', async () => {
         const startPoint = { left: 200, top: 250 };
         const scrollDistance = 80;
         const mockEndPoint = { x: 120, y: 250 }; // Mocked calculated end point
@@ -1835,7 +2058,7 @@ describe('AndroidDevice', () => {
 
         await device.scrollRight(scrollDistance, startPoint);
 
-        expect((device as any).mouseDrag).toHaveBeenCalledWith(
+        expect((device as any).dragPoint).toHaveBeenCalledWith(
           { x: 200, y: 250 },
           mockEndPoint,
         );
@@ -2000,10 +2223,77 @@ describe('AndroidDevice', () => {
         (deviceWithDisplay as any).devicePixelRatio = 1;
 
         // Test mouse click command
-        await deviceWithDisplay.mouseClick(100, 200);
+        await deviceWithDisplay.inputPrimitives.pointer.tap({
+          x: 100,
+          y: 200,
+        });
         expect(mockAdbInstance.shell).toHaveBeenCalledWith(
           expect.stringContaining('input -d 2 swipe'),
         );
+      });
+
+      it('should NOT pass the display argument to app_process (yadb) pinch even when displayId is set', async () => {
+        // `app_process` is the ART runtime launcher and does not accept the
+        // `-d <displayId>` flag the way `input`/`dumpsys` do. Passing it makes
+        // the VM fail to start and breaks aiPinch. See getDisplayArg().
+        deviceWithDisplay = new AndroidDevice('test-device', {
+          displayId: 0,
+        });
+
+        setupMockAdb(mockAdbInstance);
+
+        vi.spyOn(deviceWithDisplay, 'getAdb').mockResolvedValue(
+          mockAdbInstance as any,
+        );
+        vi.spyOn(deviceWithDisplay as any, 'ensureYadb').mockResolvedValue(
+          undefined,
+        );
+        (deviceWithDisplay as any).devicePixelRatio = 1;
+
+        await deviceWithDisplay.inputPrimitives.touch.pinch!(
+          { x: 1280, y: 720 },
+          { startDistance: 600, endDistance: 200, duration: 1200 },
+        );
+
+        const pinchCall = mockAdbInstance.shell.mock.calls.find(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' && call[0].includes('-pinch'),
+        );
+        expect(pinchCall).toBeDefined();
+        expect(pinchCall![0]).toContain('app_process -Djava.class.path');
+        expect(pinchCall![0]).not.toContain('app_process -d');
+      });
+
+      it('should throw when pinch is called on a non-default display (displayId > 0)', async () => {
+        // yadb only injects into the default display, so a non-default display
+        // would silently land the pinch on the main screen. Fail fast instead.
+        deviceWithDisplay = new AndroidDevice('test-device', {
+          displayId: 2,
+        });
+
+        setupMockAdb(mockAdbInstance);
+
+        vi.spyOn(deviceWithDisplay, 'getAdb').mockResolvedValue(
+          mockAdbInstance as any,
+        );
+        vi.spyOn(deviceWithDisplay as any, 'ensureYadb').mockResolvedValue(
+          undefined,
+        );
+        (deviceWithDisplay as any).devicePixelRatio = 1;
+
+        await expect(
+          deviceWithDisplay.inputPrimitives.touch.pinch!(
+            { x: 1280, y: 720 },
+            { startDistance: 600, endDistance: 200, duration: 1200 },
+          ),
+        ).rejects.toThrow(/non-default display/);
+
+        // No yadb command should have been issued.
+        const pinchCall = mockAdbInstance.shell.mock.calls.find(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' && call[0].includes('-pinch'),
+        );
+        expect(pinchCall).toBeUndefined();
       });
     });
 
@@ -2022,7 +2312,7 @@ describe('AndroidDevice', () => {
       (deviceWithDisplay as any).devicePixelRatio = 1;
 
       // Test mouse click command
-      await deviceWithDisplay.mouseClick(100, 200);
+      await deviceWithDisplay.inputPrimitives.pointer.tap({ x: 100, y: 200 });
       expect(mockAdbInstance.shell).toHaveBeenCalledWith(
         expect.stringContaining('input swipe'),
       );
@@ -2084,11 +2374,10 @@ describe('AndroidDevice', () => {
       await deviceWithDisplay.getAdb();
 
       // Mock fs.promises.readFile to return a valid PNG buffer
-      const mockBuffer = Buffer.from('fake-png-data');
+      const mockBuffer = createValidPngBuffer();
       (fs.promises.readFile as any).mockResolvedValue(mockBuffer);
 
       // Mock image utilities
-      vi.spyOn(ImgUtils, 'isValidImageBuffer').mockReturnValue(true);
       (ImgUtils.resizeAndConvertImgBuffer as any).mockResolvedValue({
         buffer: mockBuffer,
         format: 'png' as const,
@@ -2126,11 +2415,10 @@ describe('AndroidDevice', () => {
       await deviceWithDisplay.getAdb();
 
       // Mock fs.promises.readFile to return a valid PNG buffer
-      const mockBuffer = Buffer.from('fake-png-data');
+      const mockBuffer = createValidPngBuffer();
       (fs.promises.readFile as any).mockResolvedValue(mockBuffer);
 
       // Mock image utilities
-      vi.spyOn(ImgUtils, 'isValidImageBuffer').mockReturnValue(true);
       (ImgUtils.resizeAndConvertImgBuffer as any).mockResolvedValue({
         buffer: mockBuffer,
         format: 'png' as const,
@@ -2168,11 +2456,10 @@ describe('AndroidDevice', () => {
         Promise.resolve(mockAdbInstance);
 
       // Mock fs.promises.readFile to return a valid PNG buffer
-      const mockBuffer = Buffer.from('fake-png-data');
+      const mockBuffer = createValidPngBuffer();
       (fs.promises.readFile as any).mockResolvedValue(mockBuffer);
 
       // Mock image utilities
-      vi.spyOn(ImgUtils, 'isValidImageBuffer').mockReturnValue(true);
       (ImgUtils.resizeAndConvertImgBuffer as any).mockResolvedValue({
         buffer: mockBuffer,
         format: 'png' as const,
@@ -2230,7 +2517,7 @@ describe('AndroidDevice', () => {
         return Promise.resolve();
       });
 
-      await deviceWithDisplay.keyboardType('test');
+      await deviceWithDisplay.inputPrimitives.keyboard.typeText('test');
 
       expect(mockAdbInstance.inputText).toHaveBeenCalledWith('test');
       expect(mockAdbInstance.keyevent).toHaveBeenCalledWith(111); // ESC key for hiding keyboard
@@ -2282,7 +2569,10 @@ describe('AndroidDevice', () => {
         return { x, y };
       });
 
-      await deviceWithDisplay.longPress(100, 200, 1500);
+      await deviceWithDisplay.inputPrimitives.pointer.longPress(
+        { x: 100, y: 200 },
+        { duration: 1500 },
+      );
       expect(mockAdbInstance.shell).toHaveBeenCalledWith(
         'input -d 2 swipe 100 200 100 200 1500',
       );
@@ -2308,11 +2598,10 @@ describe('AndroidDevice', () => {
         Promise.resolve(mockAdbInstance);
 
       // Mock fs.promises.readFile to return a valid PNG buffer
-      const mockBuffer = Buffer.from('fake-png-data');
+      const mockBuffer = createValidPngBuffer();
       (fs.promises.readFile as any).mockResolvedValue(mockBuffer);
 
       // Mock image utilities
-      vi.spyOn(ImgUtils, 'isValidImageBuffer').mockReturnValue(true);
       (ImgUtils.resizeAndConvertImgBuffer as any).mockResolvedValue({
         buffer: mockBuffer,
         format: 'png' as const,
@@ -2347,57 +2636,30 @@ describe('AndroidDevice', () => {
     });
   });
 
-  describe('getTimestamp', () => {
-    it('should return device timestamp in milliseconds', async () => {
-      const mockTimestamp = '1706262645123';
-      mockAdb.shell.mockResolvedValueOnce(mockTimestamp);
+  describe('getDeviceLocalTimeString', () => {
+    it('should return device-local time with the default format', async () => {
+      mockAdb.shell.mockResolvedValueOnce('2023-10-15T15:37:02\n');
 
-      const result = await device.getTimestamp();
+      const result = await device.getDeviceLocalTimeString();
 
-      expect(mockAdb.shell).toHaveBeenCalledWith('date +%s%3N');
-      expect(result).toBe(1706262645123);
+      expect(mockAdb.shell).toHaveBeenCalledWith('date +%Y-%m-%dT%H:%M:%S');
+      expect(result).toBe('2023-10-15 15:37:02 (YYYY-MM-DD HH:mm:ss)');
     });
 
-    it('should handle timestamp with whitespace', async () => {
-      const mockTimestamp = '  1706262645123  \n';
-      mockAdb.shell.mockResolvedValueOnce(mockTimestamp);
+    it('should apply custom format tokens to device-local time', async () => {
+      mockAdb.shell.mockResolvedValueOnce('2023-10-15T15:37:02');
 
-      const result = await device.getTimestamp();
+      const result = await device.getDeviceLocalTimeString('HH:mm');
 
-      expect(result).toBe(1706262645123);
+      expect(result).toBe('15:37 (HH:mm)');
     });
 
-    it('should throw error for invalid timestamp format', async () => {
-      mockAdb.shell.mockResolvedValueOnce('invalid-timestamp');
+    it('should throw error for invalid device-local time format', async () => {
+      mockAdb.shell.mockResolvedValueOnce('invalid-time');
 
-      await expect(device.getTimestamp()).rejects.toThrow(
-        'Invalid timestamp format',
+      await expect(device.getDeviceLocalTimeString()).rejects.toThrow(
+        'Invalid device time format',
       );
-    });
-
-    it('should throw error when shell command fails', async () => {
-      mockAdb.shell.mockRejectedValueOnce(new Error('Shell command failed'));
-
-      await expect(device.getTimestamp()).rejects.toThrow(
-        'Failed to get device time',
-      );
-    });
-
-    it('should throw error for empty response', async () => {
-      mockAdb.shell.mockResolvedValueOnce('');
-
-      await expect(device.getTimestamp()).rejects.toThrow(
-        'Invalid timestamp format',
-      );
-    });
-
-    it('should handle large timestamp values', async () => {
-      const mockTimestamp = '1893456000000'; // Year 2030
-      mockAdb.shell.mockResolvedValueOnce(mockTimestamp);
-
-      const result = await device.getTimestamp();
-
-      expect(result).toBe(1893456000000);
     });
   });
 });

@@ -1,13 +1,16 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { assetUrls } from '../../assets';
 import {
   buildDeviceSelectionFormValues,
   buildStudioSidebarDeviceBuckets,
   mergeSidebarDeviceBucketsWithDiscovery,
+  normalizeStudioPlatformId,
   resolveConnectedDeviceId,
+  resolveSelectedDeviceId,
 } from '../../playground/selectors';
 import type { StudioSidebarPlatformKey } from '../../playground/types';
 import { useStudioPlayground } from '../../playground/useStudioPlayground';
+import { MaskedIcon } from '../MaskedIcon';
 import SettingsDock from '../SettingsDock';
 import type { ShellActiveView } from '../ShellLayout/types';
 
@@ -18,8 +21,6 @@ interface DeviceItem {
   label: string;
   status: DeviceStatus;
   onClick?: () => void | Promise<void>;
-  /** Purely informational rows that should never appear "selected". */
-  isPlaceholder?: boolean;
 }
 
 interface SectionDefinition {
@@ -38,59 +39,27 @@ const sectionDefinitions: SectionDefinition[] = [
 
 const EMPTY_DEVICE_ID_PREFIX = '__empty__';
 
-function SectionChevron({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className={`text-text-tertiary transition-transform ${expanded ? 'rotate-180' : ''}`}
-      fill="none"
-      height="16"
-      viewBox="0 0 16 16"
-      width="16"
-    >
-      <path
-        d="M12 10L8 6L4 10"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 function SectionHeader({
-  expanded,
   iconSrc,
   label,
-  onClick,
 }: {
-  expanded: boolean;
   iconSrc?: string;
   label: string;
-  onClick: () => void;
 }) {
   return (
-    <button
-      className="relative h-8 w-full appearance-none rounded-lg border-0 bg-transparent p-0 text-left hover:bg-surface-hover"
-      onClick={onClick}
-      type="button"
-    >
+    <div className="mb-[2px] flex h-8 w-full items-center gap-[6px] px-[12px] text-left">
       {iconSrc ? (
-        <img
-          alt=""
-          className="absolute left-[15px] top-[8px] h-4 w-4"
+        <MaskedIcon
+          className="h-4 w-4 shrink-0 text-text-secondary"
           src={iconSrc}
         />
       ) : (
-        <div className="absolute left-[15px] top-[8px] h-4 w-4" />
+        <div className="h-4 w-4 shrink-0" />
       )}
-      <span className="absolute left-[40px] top-[5px] text-[13px] leading-[22px] font-medium text-text-secondary">
+      <span className="flex-1 overflow-hidden whitespace-nowrap font-sans text-[13px] font-medium leading-[22px] text-text-secondary">
         {label}
       </span>
-      <div className="absolute left-[204px] top-0 flex h-full w-4 items-center justify-center">
-        <SectionChevron expanded={expanded} />
-      </div>
-    </button>
+    </div>
   );
 }
 
@@ -104,38 +73,43 @@ function DeviceRow({
 }) {
   return (
     <button
-      className={`relative h-8 w-full cursor-pointer appearance-none rounded-[10px] border-0 bg-transparent p-0 text-left transition-colors ${
+      className={`flex h-8 w-full cursor-pointer appearance-none items-center gap-[6px] rounded-[10px] border-0 px-[12px] text-left outline-none transition-colors focus-visible:bg-surface-hover-strong dark:focus-visible:bg-white/[0.18] ${
         selected
-          ? 'bg-surface-hover-strong hover:bg-surface-active'
-          : 'hover:bg-surface-hover active:bg-surface-active'
+          ? 'bg-surface-hover hover:bg-surface-hover dark:bg-white/[0.1] dark:hover:bg-white/[0.18]'
+          : 'bg-transparent hover:bg-surface-hover active:bg-surface-active dark:hover:bg-white/[0.16] dark:active:bg-white/[0.2]'
       }`}
       onClick={onClick}
       type="button"
     >
+      <div className="h-4 w-4 shrink-0" />
       <span
-        className={`absolute left-[40px] w-[158px] overflow-hidden whitespace-nowrap text-[13px] ${
+        className={`flex-1 overflow-hidden whitespace-nowrap font-sans text-[13px] ${
           selected
-            ? 'top-[4.5px] font-medium leading-[22.1px] text-text-primary'
-            : 'top-[8px] font-normal leading-[15.7px] text-text-secondary'
+            ? 'font-medium leading-[22.11px] text-text-primary'
+            : 'font-normal leading-[13px] text-text-secondary'
         }`}
       >
         {label}
       </span>
-      <div className="absolute left-[204px] top-[8px] flex h-4 w-4 items-center justify-center">
-        <div
-          className={`h-[6px] w-[6px] rounded-full ${
-            status === 'active' ? 'bg-status-success' : 'bg-status-idle'
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <span
+          aria-hidden="true"
+          className={`h-[8px] w-[8px] rounded-full ${
+            status === 'active'
+              ? 'bg-status-success shadow-[0_0_0_2px_rgba(66,181,108,0.25)]'
+              : 'bg-[#BFC0C1] shadow-[0_0_0_2px_rgba(182,182,182,0.22)]'
           }`}
         />
-      </div>
+      </span>
     </button>
   );
 }
 
 function EmptyDeviceRow() {
   return (
-    <div className="relative h-8 w-full rounded-lg">
-      <span className="absolute left-[40px] top-[8px] overflow-hidden whitespace-nowrap text-[12px] font-normal leading-[15.7px] text-text-tertiary">
+    <div className="flex h-8 w-full items-center gap-[6px] rounded-lg px-[12px]">
+      <div className="h-4 w-4 shrink-0" />
+      <span className="flex-1 overflow-hidden whitespace-nowrap font-sans text-[13px] font-normal leading-[13px] text-text-tertiary">
         No devices
       </span>
     </div>
@@ -146,30 +120,25 @@ export interface SidebarProps {
   activeView: ShellActiveView;
   onSelectOverview: () => void;
   onSelectDevice: () => void;
+  /** Fires the instant the user clicks a device row so the device preview
+   * header can render the correct platform icon without waiting for
+   * antd's Form.useWatch to settle. */
+  onPendingCreatePlatform?: (platform: StudioSidebarPlatformKey) => void;
 }
 
 export default function Sidebar({
   activeView,
   onSelectOverview,
   onSelectDevice,
+  onPendingCreatePlatform,
 }: SidebarProps) {
   const studioPlayground = useStudioPlayground();
-  const [expandedSections, setExpandedSections] = useState<
-    Record<StudioSidebarPlatformKey, boolean>
-  >({
-    android: true,
-    computer: true,
-    harmony: true,
-    ios: true,
-    web: true,
-  });
-
-  const toggleSection = (sectionKey: StudioSidebarPlatformKey) => {
-    setExpandedSections((current) => ({
-      ...current,
-      [sectionKey]: !current[sectionKey],
-    }));
-  };
+  // Sticky record of the user's most recent click. Kept locally so the
+  // highlight survives any transient form-state churn during the
+  // destroy → refreshSessionSetup → createSession round-trip.
+  const [stickySelection, setStickySelection] = useState<
+    { platformKey: StudioSidebarPlatformKey; deviceId: string } | undefined
+  >(undefined);
 
   // Device buckets: merge session-setup targets (from the currently
   // selected platform) with cross-platform discovered devices. Discovery
@@ -196,10 +165,14 @@ export default function Sidebar({
     studioPlayground.discoveredDevices,
   );
 
-  const connectedDeviceId =
+  const runtimeInfo =
     studioPlayground.phase === 'ready'
-      ? resolveConnectedDeviceId(studioPlayground.controller.state.runtimeInfo)
-      : undefined;
+      ? studioPlayground.controller.state.runtimeInfo
+      : null;
+  const connectedDeviceId = resolveConnectedDeviceId(runtimeInfo);
+  const connectedPlatformKey = normalizeStudioPlatformId(
+    runtimeInfo?.platformId ?? runtimeInfo?.interface?.type,
+  );
 
   /**
    * Build a click-enabled device list for any platform section. The
@@ -212,47 +185,10 @@ export default function Sidebar({
     devices: typeof deviceBuckets.android,
   ): DeviceItem[] => {
     if (studioPlayground.phase !== 'ready') {
-      if (platformKey === 'android') {
-        return [
-          {
-            id: `${platformKey}-placeholder`,
-            label:
-              studioPlayground.phase === 'booting'
-                ? 'Playground starting'
-                : 'Runtime failed to start',
-            status: 'idle' as const,
-            isPlaceholder: true,
-          },
-        ];
-      }
+      // Boot / error state has its own indicator in MainContent — leave every
+      // sidebar section empty rather than spamming a placeholder row per
+      // platform.
       return [];
-    }
-
-    // iOS discovery needs WebDriverAgent running, which is a manual
-    // setup step; surface a hint row instead of an empty section so
-    // users know it isn't a bug.
-    if (platformKey === 'ios' && devices.length === 0) {
-      return [
-        {
-          id: 'ios-setup-hint',
-          label: 'Set up iOS via the playground form',
-          status: 'idle' as const,
-          isPlaceholder: true,
-          onClick: async () => {
-            if (studioPlayground.phase !== 'ready') {
-              return;
-            }
-            const { actions, state } = studioPlayground.controller;
-            const nextValues = {
-              ...state.form.getFieldsValue(true),
-              platformId: 'ios',
-            };
-            state.form.setFieldsValue(nextValues);
-            onSelectDevice();
-            await actions.refreshSessionSetup(nextValues);
-          },
-        },
-      ];
     }
 
     return devices.map((item) => ({
@@ -264,6 +200,18 @@ export default function Sidebar({
           return;
         }
         const { actions, state } = studioPlayground.controller;
+
+        // Stamp the highlight synchronously so the row stays selected
+        // even before the form state propagates through useWatch.
+        setStickySelection({ platformKey, deviceId: item.id });
+        // Same idea for the device-preview header: surface the platform
+        // immediately so its icon doesn't flash the default Android phone.
+        onPendingCreatePlatform?.(platformKey);
+
+        if (item.selected && item.status === 'active') {
+          onSelectDevice();
+          return;
+        }
 
         // Tell the multi-platform session manager which platform +
         // device to target. Field keys follow the `{platformId}.fieldKey`
@@ -281,6 +229,10 @@ export default function Sidebar({
         }
         if (state.sessionViewState.connected) {
           await actions.destroySession();
+          // refreshSessionSetup inside destroySession may overwrite the
+          // selection we just stamped — re-apply it so the highlight
+          // and the next createSession agree.
+          state.form.setFieldsValue(selectionValues);
         }
         const sessionValues = {
           ...state.form.getFieldsValue(true),
@@ -291,15 +243,47 @@ export default function Sidebar({
     }));
   };
 
-  const selectedDeviceIds =
+  // Source-of-truth for the sidebar highlight is the form's selection
+  // (i.e. the row the user most recently clicked) — not the connected
+  // device, so the highlight stays put during the session swap from one
+  // device to another. The active-status dot still tracks the live
+  // connection separately.
+  const formValues =
     studioPlayground.phase === 'ready'
-      ? new Set(
-          Object.values(deviceBuckets)
-            .flat()
-            .filter((item) => item.selected)
-            .map((item) => item.id),
-        )
-      : new Set<string>();
+      ? studioPlayground.controller.state.formValues
+      : undefined;
+  const formSelectedPlatformKey = formValues
+    ? normalizeStudioPlatformId(formValues.platformId)
+    : undefined;
+  const formSelectedDeviceId = formValues
+    ? resolveSelectedDeviceId(formValues)
+    : undefined;
+
+  // Keep stickySelection in lockstep with the form. If a downstream
+  // effect (refreshSessionSetup, discovery auto-select, switching to a
+  // different platform's session) updates the form, the sticky highlight
+  // follows — including clearing it when the form is fully empty so a
+  // stale Computer/Android row doesn't stay highlighted after the user
+  // opens a Web session or returns to Overview.
+  useEffect(() => {
+    if (!formSelectedPlatformKey || !formSelectedDeviceId) {
+      setStickySelection((prev) => (prev ? undefined : prev));
+      return;
+    }
+    setStickySelection((prev) => {
+      if (
+        prev &&
+        prev.platformKey === formSelectedPlatformKey &&
+        prev.deviceId === formSelectedDeviceId
+      ) {
+        return prev;
+      }
+      return {
+        platformKey: formSelectedPlatformKey,
+        deviceId: formSelectedDeviceId,
+      };
+    });
+  }, [formSelectedPlatformKey, formSelectedDeviceId]);
 
   const totalDeviceCount = sectionDefinitions.reduce(
     (sum, section) => sum + deviceBuckets[section.key].length,
@@ -319,65 +303,90 @@ export default function Sidebar({
   return (
     <div className="flex flex-col">
       <button
-        className={`relative h-8 w-full appearance-none border-0 p-0 text-left ${
+        className={`flex h-8 w-full appearance-none items-center gap-[6px] border-0 px-[12px] text-left outline-none focus-visible:bg-surface-hover-strong dark:focus-visible:bg-white/[0.18] ${
           overviewActive
-            ? 'rounded-[10px] bg-black/5'
-            : 'rounded-lg bg-transparent hover:bg-surface-hover'
+            ? 'rounded-[10px] bg-black/5 dark:bg-white/[0.1]'
+            : 'rounded-lg bg-transparent hover:bg-surface-hover dark:hover:bg-white/[0.16]'
         }`}
         onClick={onSelectOverview}
         type="button"
       >
-        <img
-          alt=""
-          className="absolute left-[12px] top-[8px] h-4 w-4"
+        <MaskedIcon
+          className="h-4 w-4 shrink-0 text-text-secondary"
           src={assetUrls.sidebar.overview}
         />
-        <span className="absolute left-[40px] top-[5px] overflow-hidden whitespace-nowrap text-[13px] leading-[22px] font-medium text-text-secondary">
-          Device overview
+        <span className="flex-1 overflow-hidden whitespace-nowrap font-sans text-[13px] font-medium leading-[22px] text-text-secondary">
+          Overview
         </span>
-        <span className="absolute right-[12px] top-[6px] font-['PingFang_SC'] text-[11px] font-normal leading-[20px] text-text-tertiary">
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center font-sans text-[11px] font-normal leading-none text-text-tertiary">
           {totalDeviceCount}
         </span>
       </button>
 
       <div className="mt-1 flex flex-col">
-        <div className="relative h-8 w-full">
-          <span className="absolute left-[12px] top-[5px] overflow-hidden whitespace-nowrap text-[13px] font-medium leading-[22px] text-text-tertiary">
+        <div className="flex h-8 w-full items-center pl-[12px]">
+          <span className="overflow-hidden whitespace-nowrap font-sans text-[13px] font-medium leading-[22px] text-text-placeholder">
             Platform
           </span>
         </div>
 
         <div className="flex flex-col">
           {resolvedSections.map((section) => {
-            const isExpanded = expandedSections[section.key];
             const hasDevices = section.devices.length > 0;
             return (
-              <div className="flex flex-col" key={section.key}>
+              <div
+                className="flex flex-col pb-[2px] last:pb-0"
+                key={section.key}
+              >
                 <SectionHeader
-                  expanded={isExpanded}
                   iconSrc={section.iconSrc}
                   label={section.label}
-                  onClick={() => toggleSection(section.key)}
                 />
 
-                {isExpanded ? (
-                  hasDevices ? (
-                    section.devices.map((device) => (
-                      <DeviceRow
-                        key={device.id}
-                        selected={
-                          !device.isPlaceholder &&
-                          selectedDeviceIds.has(device.id)
+                {hasDevices ? (
+                  <div className="flex flex-col gap-[4px]">
+                    {section.devices.map((device) => {
+                      // Single-source-of-truth selection: only one row
+                      // may ever be highlighted, even while sticky / form /
+                      // connected diverge during a fast re-click. Sticky
+                      // wins (matches the user's intent the instant they
+                      // click), with form / connected as fallbacks.
+                      // On Overview we suppress every highlight because
+                      // the page is meant to be a "no device picked yet"
+                      // state.
+                      let selected = false;
+                      if (activeView !== 'overview') {
+                        if (stickySelection) {
+                          selected =
+                            stickySelection.platformKey === section.key &&
+                            stickySelection.deviceId === device.id;
+                        } else if (
+                          formSelectedDeviceId &&
+                          formSelectedPlatformKey
+                        ) {
+                          selected =
+                            formSelectedPlatformKey === section.key &&
+                            formSelectedDeviceId === device.id;
+                        } else if (connectedDeviceId && connectedPlatformKey) {
+                          selected =
+                            connectedPlatformKey === section.key &&
+                            connectedDeviceId === device.id;
                         }
-                        {...device}
-                      />
-                    ))
-                  ) : (
-                    <EmptyDeviceRow
-                      key={`${EMPTY_DEVICE_ID_PREFIX}${section.key}`}
-                    />
-                  )
-                ) : null}
+                      }
+                      return (
+                        <DeviceRow
+                          key={device.id}
+                          selected={selected}
+                          {...device}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyDeviceRow
+                    key={`${EMPTY_DEVICE_ID_PREFIX}${section.key}`}
+                  />
+                )}
               </div>
             );
           })}
@@ -391,15 +400,19 @@ export interface SidebarFooterProps {
   settingsOpen: boolean;
   onToggleSettings: () => void;
   onEnvClick?: () => void;
+  /** Surface a "missing config" red badge on the env dock row. */
+  envAlert?: boolean;
 }
 
 export function SidebarFooter({
+  envAlert,
   settingsOpen,
   onToggleSettings,
   onEnvClick,
 }: SidebarFooterProps) {
   return (
     <SettingsDock
+      envAlert={envAlert}
       onEnvClick={onEnvClick}
       onToggleSettings={onToggleSettings}
       settingsOpen={settingsOpen}

@@ -1,4 +1,5 @@
 import type { DeviceAction } from '@midscene/core';
+import type { TModelConfig } from '@midscene/shared/env';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BasePlaygroundAdapter } from '../../src/adapters/base';
 import type { FormValue } from '../../src/types';
@@ -14,6 +15,12 @@ class TestAdapter extends BasePlaygroundAdapter {
 
   async executeAction(): Promise<unknown> {
     return 'test result';
+  }
+
+  async overrideConfig(): Promise<void> {}
+
+  async runConnectivityTest(_config: TModelConfig) {
+    return { passed: true };
   }
 }
 

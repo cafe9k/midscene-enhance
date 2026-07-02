@@ -3,6 +3,7 @@ export type { ComputerDeviceOpt, DisplayInfo } from './device';
 
 export {
   ComputerAgent,
+  agentForComputer,
   agentForRDPComputer,
   agentFromComputer,
 } from './agent';
@@ -36,12 +37,13 @@ export type {
   RDPScrollDirection,
 } from './rdp/protocol';
 
-export { ComputerMidsceneTools } from './mcp-tools';
+export { ComputerMidsceneTools } from './agent-tools';
 export { overrideAIConfig } from '@midscene/shared/env';
 export {
   checkComputerEnvironment,
   getConnectedDisplays,
   checkAccessibilityPermission,
+  checkScreenRecordingPermission,
   version,
 } from './utils';
 

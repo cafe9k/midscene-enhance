@@ -213,9 +213,6 @@ async function pushToGithub(selectVersion) {
 
 async function publish(version) {
   try {
-    step('\nSetting npmrc ...');
-    await writeNpmrc();
-
     let releaseTag = 'latest';
     if (version.includes('alpha')) {
       releaseTag = 'alpha';
@@ -234,6 +231,10 @@ async function publish(version) {
       throw new Error(errorMsg);
     }
 
+    // npm Trusted Publishers generate provenance automatically for GitHub
+    // Actions publishes. Do not pass `--provenance` explicitly here: npm 11
+    // already creates the transparency-log entry for trusted publishing, and
+    // an extra flag can make the publish fail with a duplicate tlog entry.
     let publishArgs = [
       '-r',
       'publish',
@@ -267,29 +268,6 @@ async function createVersionMarkerFile(version) {
   } catch (error) {
     console.error(chalk.red('Error creating version marker file'));
     throw error;
-  }
-}
-
-async function writeNpmrc() {
-  if (process.env.CI) {
-    try {
-      const npmRcPath = `${process.env.HOME}/.npmrc`;
-      console.info(
-        `Current .npmrc file path is ${npmRcPath}, npm token is ${process.env.NPM_TOKEN}`,
-      );
-      if (fs.existsSync(npmRcPath)) {
-        console.info('Found existing .npmrc file');
-      } else {
-        console.info('No .npmrc file found, creating one');
-        fs.writeFileSync(
-          npmRcPath,
-          `//registry.npmjs.org/:_authToken=${process.env.NPM_TOKEN}`,
-        );
-      }
-    } catch (error) {
-      console.error(chalk.red('Error setting .npmrc'));
-      throw error;
-    }
   }
 }
 

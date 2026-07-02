@@ -4,6 +4,7 @@ import type {
   ModelBrief,
   UIContext,
 } from '@midscene/core';
+import type { TModelConfig } from '@midscene/shared/env';
 import type { ComponentType, ReactNode } from 'react';
 
 // Zod schema related types - compatible with actual zod types
@@ -232,7 +233,11 @@ export const extractDefaultValue = (field: ZodType): unknown => {
   return undefined;
 };
 
-import type { ExecutionDump, IExecutionDump } from '@midscene/core';
+import type {
+  ExecutionDump,
+  IExecutionDump,
+  IReportActionDump,
+} from '@midscene/core';
 import type {
   BeforeActionHook,
   ExecutionOptions,
@@ -243,7 +248,7 @@ import type {
 // result type
 export interface PlaygroundResult {
   result: any;
-  dump?: ExecutionDump | IExecutionDump | null;
+  dump?: ExecutionDump | IExecutionDump | IReportActionDump | null;
   reportHTML?: string | null;
   error: string | null;
 }
@@ -304,6 +309,18 @@ export interface FormValue {
   params?: Record<string, unknown>;
 }
 
+export interface ExecutionReportDisplay {
+  type?: string;
+  prompt?: string;
+}
+
+export interface ExternalRunRequest {
+  id: string;
+  value: FormValue;
+  displayContent?: string;
+  reportDisplay?: ExecutionReportDisplay;
+}
+
 // ExecutionOptions is imported from playground package to ensure consistency
 export type { ExecutionOptions };
 
@@ -326,15 +343,15 @@ export interface PlaygroundSDKLike {
     callback: (dump: string, executionDump?: ExecutionDump) => void,
   ) => void;
   cancelExecution?(requestId: string): Promise<{
-    dump: ExecutionDump | null;
+    dump: ExecutionDump | IExecutionDump | IReportActionDump | null;
     reportHTML: string | null;
   } | null>;
   getCurrentExecutionData?(): Promise<{
-    dump: ExecutionDump | null;
+    dump: ExecutionDump | IExecutionDump | IReportActionDump | null;
     reportHTML: string | null;
   }>;
   overrideConfig?(config: any): Promise<void>;
-  runConnectivityTest?(): Promise<ConnectivityTestResult>;
+  runConnectivityTest?(config: TModelConfig): Promise<ConnectivityTestResult>;
   checkStatus?(): Promise<boolean>;
   getServiceMode?(): 'In-Browser-Extension' | 'Server';
   getRuntimeInfo?(): Promise<PlaygroundRuntimeInfo | null>;
@@ -384,10 +401,25 @@ export interface InfoListItem {
   actionKind?: string;
 }
 
+export interface ReportDownloadRequest {
+  content: string;
+  defaultFileName: string;
+}
+
+export type ReportDownloadHandler = (
+  request: ReportDownloadRequest,
+) => void | Promise<void>;
+
 // main component config interface
 export interface UniversalPlaygroundConfig {
   showContextPreview?: boolean;
   storageNamespace?: string;
+  /**
+   * Whether playground conversation/execution messages are persisted.
+   * Defaults to `true`. Host shells can set this to `false` when each mounted
+   * playground panel should start from a fresh conversation.
+   */
+  persistMessages?: boolean;
   layout?: 'vertical' | 'horizontal';
   showVersionInfo?: boolean;
   enableScrollToBottom?: boolean;
@@ -396,6 +428,7 @@ export interface UniversalPlaygroundConfig {
   deviceType?: DeviceType;
   executionUx?: ExecutionUxConfig;
   promptInputChrome?: PromptInputChromeConfig;
+  externalRunRequest?: ExternalRunRequest | null;
   /**
    * Whether to render the "clear conversation" button that appears above the
    * message list once there is more than one item. Defaults to `true`.
@@ -410,11 +443,22 @@ export interface UniversalPlaygroundConfig {
    */
   showSystemMessageHeader?: boolean;
   /**
+   * Optional host-provided content rendered when the conversation has no
+   * user-visible chat messages yet. The internal welcome message stays in
+   * state, but compact hosts can replace its default text block visually.
+   */
+  emptyState?: ReactNode;
+  /**
    * Opt-in controls for how consecutive progress items render in the
    * conversation log. Defaults flatten every progress step inline (no
    * grouping, no connector) so existing hosts keep their behaviour.
    */
   executionFlow?: ExecutionFlowConfig;
+  /**
+   * Optional host-provided report download hook.
+   * Defaults to the browser Blob download flow when omitted.
+   */
+  onDownloadReport?: ReportDownloadHandler;
 }
 
 export interface ExecutionFlowConfig {
@@ -462,6 +506,7 @@ export interface PromptInputChromeConfig {
     history?: string;
     settings?: string;
   };
+  inputActions?: ReactNode;
 }
 
 // branding interface

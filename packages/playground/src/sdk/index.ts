@@ -1,9 +1,15 @@
 import type { ConnectivityTestResult, DeviceAction } from '@midscene/core';
 import { PLAYGROUND_SERVER_PORT } from '@midscene/shared/constants';
+import type { TModelConfig } from '@midscene/shared/env';
 import type { BasePlaygroundAdapter } from '../adapters/base';
 import { LocalExecutionAdapter } from '../adapters/local-execution';
 import { RemoteExecutionAdapter } from '../adapters/remote-execution';
 import type {
+  PlaygroundRecorderCapabilitiesResult,
+  PlaygroundRecorderDescribeResult,
+  PlaygroundRecorderEvent,
+  PlaygroundRecorderEventsResult,
+  PlaygroundRecorderStartResult,
   PlaygroundSessionSetup,
   PlaygroundSessionState,
   PlaygroundSessionTarget,
@@ -18,6 +24,23 @@ import type {
   PlaygroundConfig,
   ValidationResult,
 } from '../types';
+
+export type PlaygroundInteractPayload = {
+  actionType: string;
+} & Record<string, unknown>;
+
+export interface PlaygroundInteractResult {
+  ok: boolean;
+  error?: string;
+}
+
+export type PlaygroundPageRecordedEvent = PlaygroundRecorderEvent;
+export type {
+  PlaygroundRecorderCapabilitiesResult,
+  PlaygroundRecorderDescribeResult,
+  PlaygroundRecorderEventsResult,
+  PlaygroundRecorderStartResult,
+};
 
 export class PlaygroundSDK {
   private adapter: BasePlaygroundAdapter;
@@ -142,8 +165,10 @@ export class PlaygroundSDK {
     return this.adapter.overrideConfig(aiConfig);
   }
 
-  async runConnectivityTest(): Promise<ConnectivityTestResult> {
-    return this.adapter.runConnectivityTest();
+  async runConnectivityTest(
+    aiConfig: TModelConfig,
+  ): Promise<ConnectivityTestResult> {
+    return this.adapter.runConnectivityTest(aiConfig);
   }
 
   // Get task progress (for remote execution)
@@ -233,10 +258,74 @@ export class PlaygroundSDK {
     return null; // For local execution, not supported yet
   }
 
+  // Direct device manipulation – mouse/keyboard input from UI overlays.
+  async interact(
+    payload: PlaygroundInteractPayload,
+  ): Promise<PlaygroundInteractResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.interact(payload);
+    }
+    return { ok: false, error: 'Direct interaction requires remote execution' };
+  }
+
+  async startRecorderSession(
+    sessionId: string,
+  ): Promise<PlaygroundRecorderStartResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.startRecorderSession(sessionId);
+    }
+    return {
+      ok: false,
+      supported: false,
+      error: 'Recorder requires remote execution',
+    };
+  }
+
+  async getRecorderCapabilities(): Promise<PlaygroundRecorderCapabilitiesResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.getRecorderCapabilities();
+    }
+    return {
+      supported: false,
+      source: 'unsupported',
+      error: 'Recorder requires remote execution',
+    };
+  }
+
+  async stopRecorderSession(): Promise<PlaygroundInteractResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.stopRecorderSession();
+    }
+    return { ok: true };
+  }
+
+  async getRecorderEvents(since = 0): Promise<PlaygroundRecorderEventsResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.getRecorderEvents(since);
+    }
+    return { events: [], nextIndex: since };
+  }
+
+  async describeRecorderEventAtPoint(
+    event: PlaygroundRecorderEvent,
+  ): Promise<PlaygroundRecorderDescribeResult> {
+    if (this.adapter instanceof RemoteExecutionAdapter) {
+      return this.adapter.describeRecorderEventAtPoint(event);
+    }
+    return {
+      ok: false,
+      error: 'Recorder aiDescribe requires remote execution',
+    };
+  }
+
   // Get interface information (type and description)
   async getInterfaceInfo(): Promise<{
     type: string;
     description?: string;
+    size?: { width: number; height: number };
+    navigationState?: { isLoading: boolean };
+    /** Action names exposed by the connected device's actionSpace. */
+    actionTypes?: string[];
   } | null> {
     const adapter = this.runtimeMetadataAdapter();
     if (!adapter) {

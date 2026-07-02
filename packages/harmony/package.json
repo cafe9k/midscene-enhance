@@ -1,6 +1,11 @@
 {
   "name": "@midscene/harmony",
-  "version": "1.7.5",
+  "version": "1.10.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/web-infra-dev/midscene.git",
+    "directory": "packages/harmony"
+  },
   "description": "HarmonyOS automation library for Midscene",
   "keywords": [
     "HarmonyOS UI automation",
@@ -22,11 +27,6 @@
       "import": "./dist/es/index.mjs",
       "require": "./dist/lib/index.js"
     },
-    "./mcp-server": {
-      "types": "./dist/types/mcp-server.d.ts",
-      "import": "./dist/es/mcp-server.mjs",
-      "require": "./dist/lib/mcp-server.js"
-    },
     "./bin": {
       "types": "./dist/types/bin.d.ts",
       "import": "./dist/es/bin.mjs",
@@ -40,8 +40,8 @@
     "build:watch": "rslib build --watch --no-clean",
     "test": "vitest --run",
     "test:u": "vitest --run -u",
-    "test:ai": "AI_TEST_TYPE=harmony npm run test",
-    "test:ai:cache": "MIDSCENE_CACHE=true AI_TEST_TYPE=harmony npm run test"
+    "test:ai": "AI_TEST_TYPE=harmony vitest --run",
+    "test:ai:cache": "MIDSCENE_CACHE=true AI_TEST_TYPE=harmony vitest --run"
   },
   "dependencies": {
     "@midscene/core": "workspace:*",

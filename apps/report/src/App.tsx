@@ -1,12 +1,11 @@
 import './App.less';
 
-import { Alert, ConfigProvider, Empty, theme } from 'antd';
+import { Alert, App as AntdApp, ConfigProvider, Empty, theme } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 
 import {
   GroupedActionDump,
-  type ModelBrief,
   dedupeExecutionsKeepLatest,
   restoreImageReferences,
 } from '@midscene/core';
@@ -22,6 +21,7 @@ import DetailSide from './components/detail-side';
 import GlobalHoverPreview from './components/global-hover-preview';
 import Sidebar from './components/sidebar';
 import { type DumpStoreType, useExecutionDump } from './components/store';
+import { useTaskHashAnchor } from './components/store/use-task-hash-anchor';
 import Timeline from './components/timeline';
 import ThemeDarkIcon from './icons/theme-dark.svg?react';
 import ThemeLightIcon from './icons/theme-light.svg?react';
@@ -30,6 +30,8 @@ import type {
   PlaywrightTasks,
   VisualizerProps,
 } from './types';
+import { formatModelBriefText } from './utils/model-brief';
+import { getPlayerViewOptions } from './utils/player-only';
 import {
   getEmptyDumpDescription,
   parseDumpAttributes,
@@ -66,15 +68,6 @@ let globalRenderCount = 1;
 const SIDEBAR_WIDTH_KEY = 'midscene-sidebar-width';
 const DEFAULT_SIDEBAR_WIDTH = 280;
 
-const formatModelBrief = (
-  modelBrief: ModelBrief,
-  includeIntent: boolean,
-): string => {
-  const { name, modelDescription, intent } = modelBrief;
-  const base = modelDescription ? `${name}(${modelDescription})` : name;
-  return includeIntent ? `${intent}/${base}` : `${base}`;
-};
-
 function Visualizer(props: VisualizerProps): JSX.Element {
   const { dumps } = props;
 
@@ -87,6 +80,9 @@ function Visualizer(props: VisualizerProps): JSX.Element {
   const replayAllScripts = useExecutionDump(
     (store) => store.allExecutionAnimation,
   );
+  const activeExecutionAnimation = useExecutionDump(
+    (store) => store.activeExecutionAnimation,
+  );
   const insightWidth = useExecutionDump((store) => store.insightWidth);
   const insightHeight = useExecutionDump((store) => store.insightHeight);
   const replayAllMode = useExecutionDump((store) => store.replayAllMode);
@@ -97,9 +93,7 @@ function Visualizer(props: VisualizerProps): JSX.Element {
   const playwrightAttributes = useExecutionDump(
     (store) => store.playwrightAttributes,
   );
-  const modelBriefText = modelBriefs
-    .map((brief) => formatModelBrief(brief, modelBriefs.length > 1))
-    .join(', ');
+  const modelBriefText = formatModelBriefText(modelBriefs);
   const reset = useExecutionDump((store) => store.reset);
   const [mainLayoutChangeFlag, setMainLayoutChangeFlag] = useState(0);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -114,6 +108,18 @@ function Visualizer(props: VisualizerProps): JSX.Element {
     darkModeEnabled: isDarkMode,
     setDarkModeEnabled: setIsDarkMode,
   } = useGlobalPreference();
+
+  // Player view flags from the URL. `player-only=1` strips all report chrome
+  // (nav, sidebar, timeline, detail side) and keeps just the Player; in that
+  // mode `play-control=1` shows the control bar. `auto-play` is independent of
+  // player-only and applies to every report player (on by default, `=0` off).
+  const { playerOnly, playControl, autoPlay } = useMemo(
+    () => getPlayerViewOptions(),
+    [],
+  );
+
+  // Keep the URL hash in sync with the selected sidebar task (deep-linking).
+  useTaskHashAnchor();
 
   useEffect(() => {
     document.documentElement.setAttribute(
@@ -179,6 +185,7 @@ function Visualizer(props: VisualizerProps): JSX.Element {
             imageWidth={insightWidth!}
             imageHeight={insightHeight!}
             onTaskChange={setPlayingTaskId}
+            autoPlay={autoPlay}
           />
         </div>
       );
@@ -187,7 +194,7 @@ function Visualizer(props: VisualizerProps): JSX.Element {
       <PanelGroup autoSaveId="page-detail-layout-v2" direction="horizontal">
         <Panel defaultSize={75} maxSize={95}>
           <div className="main-content-container">
-            <DetailPanel />
+            <DetailPanel autoPlay={autoPlay} />
           </div>
         </Panel>
         <PanelResizeHandle className="resize-handle" />
@@ -200,8 +207,11 @@ function Visualizer(props: VisualizerProps): JSX.Element {
     );
   };
 
-  let mainContent: JSX.Element;
-  if (allSkipped && (!dump || dump.executions.length === 0)) {
+  // Skip building the report chrome entirely when only the Player is requested.
+  let mainContent: JSX.Element | null = null;
+  if (playerOnly) {
+    // Player-only mode renders `playerOnlyContent`; leave `mainContent` unused.
+  } else if (allSkipped && (!dump || dump.executions.length === 0)) {
     mainContent = (
       <div className="main-right">
         <Empty
@@ -321,6 +331,35 @@ function Visualizer(props: VisualizerProps): JSX.Element {
     };
   }, []);
 
+  // In player-only mode, skip every piece of chrome and render just the Player.
+  // Mirror the main view's script source: the report opens in "replay all" mode
+  // by default (whole-flow animation); deep-linking to a `#task-<id>` anchor
+  // switches to that single task's replay.
+  const playerOnlyScripts =
+    (replayAllMode ? replayAllScripts : activeExecutionAnimation) || [];
+  let playerOnlyContent: JSX.Element;
+  if (!executionDump) {
+    playerOnlyContent = <Empty description="Loading report content..." />;
+  } else if (playerOnlyScripts.length === 0) {
+    // Player renders nothing for empty scripts; show feedback instead of a blank
+    // page (e.g. the active task is not a Planning step with a replay animation).
+    playerOnlyContent = (
+      <Empty description="No replay available for this step." />
+    );
+  } else {
+    playerOnlyContent = (
+      <Player
+        key={`${executionDumpLoadId}`}
+        replayScripts={playerOnlyScripts}
+        imageWidth={insightWidth || 0}
+        imageHeight={insightHeight || 0}
+        onTaskChange={replayAllMode ? setPlayingTaskId : undefined}
+        hideControls={!playControl}
+        autoPlay={autoPlay}
+      />
+    );
+  }
+
   return (
     <ConfigProvider
       theme={{
@@ -328,35 +367,43 @@ function Visualizer(props: VisualizerProps): JSX.Element {
         algorithm: isDarkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
       }}
     >
-      <div
-        className="page-container"
-        key={`render-${globalRenderCount}`}
-        style={{ height: containerHeight }}
-        data-theme={isDarkMode ? 'dark' : 'light'}
-      >
-        <div className="page-nav">
-          <div className="page-nav-left">
-            <Logo />
-          </div>
-          <div className="page-nav-right">
-            <div className="page-nav-version">
-              v{sdkVersion}
-              {modelBriefText ? ` | ${modelBriefText}` : ''}
-            </div>
-            <div className="theme-divider" />
-            <button
-              type="button"
-              className="theme-toggle-button"
-              onClick={() => setIsDarkMode(!isDarkMode)}
-              aria-label="Toggle theme"
-            >
-              {isDarkMode ? <ThemeDarkIcon /> : <ThemeLightIcon />}
-            </button>
-          </div>
+      <AntdApp component={false}>
+        <div
+          className={`page-container${playerOnly ? ' player-only' : ''}`}
+          key={`render-${globalRenderCount}`}
+          style={{ height: containerHeight }}
+          data-theme={isDarkMode ? 'dark' : 'light'}
+        >
+          {playerOnly ? (
+            <div className="player-only-content">{playerOnlyContent}</div>
+          ) : (
+            <>
+              <div className="page-nav">
+                <div className="page-nav-left">
+                  <Logo />
+                </div>
+                <div className="page-nav-right">
+                  <div className="page-nav-version">
+                    {sdkVersion ? `v${sdkVersion}` : 'unknown version'}
+                    {modelBriefText ? ` | ${modelBriefText}` : ''}
+                  </div>
+                  <div className="theme-divider" />
+                  <button
+                    type="button"
+                    className="theme-toggle-button"
+                    onClick={() => setIsDarkMode(!isDarkMode)}
+                    aria-label="Toggle theme"
+                  >
+                    {isDarkMode ? <ThemeDarkIcon /> : <ThemeLightIcon />}
+                  </button>
+                </div>
+              </div>
+              {mainContent}
+            </>
+          )}
         </div>
-        {mainContent}
-      </div>
-      <GlobalHoverPreview />
+        <GlobalHoverPreview />
+      </AntdApp>
     </ConfigProvider>
   );
 }

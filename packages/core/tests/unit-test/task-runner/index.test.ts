@@ -1,3 +1,4 @@
+import { getModelRuntime } from '@/ai-model/models';
 import { ScreenshotItem, TaskRunner } from '@/index';
 import type {
   ExecutionTaskActionApply,
@@ -8,8 +9,8 @@ import type {
   UIContext,
 } from '@/index';
 import Service from '@/service';
-import { createFakeContext } from 'tests/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createFakeContext } from '../../utils';
 
 // Mock AI service caller
 vi.mock('@/ai-model/service-caller/index', () => ({
@@ -40,11 +41,13 @@ const insightFindTask = (shouldThrow?: boolean) => {
           prompt: param.prompt,
         },
         {},
-        {
+        getModelRuntime({
           modelName: 'mock-model',
+          modelFamily: 'qwen2.5-vl',
           modelDescription: 'mock-model-description',
           intent: 'default',
-        },
+          slot: 'default',
+        }),
       );
       return {
         output: {

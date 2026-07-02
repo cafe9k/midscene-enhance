@@ -4,22 +4,38 @@ export {
   callAIWithObjectResponse,
   callAI,
 } from './service-caller/index';
+export { getModelRuntime, type ModelRuntime } from './models';
 export {
   runConnectivityTest,
-  type ConnectivityCheckResultItem,
   type ConnectivityTestConfig,
   type ConnectivityTestResult,
-} from './connectivity';
+} from './connectivity/index';
 export { systemPromptToLocateElement } from './prompt/llm-locator';
 export {
   generatePlaywrightTest,
   generatePlaywrightTestStream,
 } from './prompt/playwright-generator';
 export {
+  convertRecordLogIntoMarkdown,
+  createRecorderMarkdownReplayPrompt,
+  generateRecorderMarkdownReplay,
+} from './prompt/markdown-generator';
+export type { RecorderMarkdownGenerationInput } from './prompt/markdown-generator';
+export { generateRecorderSessionMetadata } from './prompt/recorder-metadata-generator';
+export type {
+  RecorderGeneratedMetadata,
+  RecorderMetadataGenerationInput,
+} from './prompt/recorder-metadata-generator';
+export {
+  generateRecorderYamlTest,
+  generateRecorderYamlTestStream,
   generateYamlTest,
   generateYamlTestStream,
 } from './prompt/yaml-generator';
-export type { YamlGenerationOptions } from './prompt/yaml-generator';
+export type {
+  RecorderYamlGenerationInput,
+  YamlGenerationOptions,
+} from './prompt/yaml-generator';
 
 export type { ChatCompletionMessageParam } from 'openai/resources/index';
 
@@ -31,16 +47,13 @@ export {
 } from './inspect';
 
 export { plan } from './llm-planning';
-export { autoGLMPlanning } from './auto-glm/planning';
-export { adaptBboxToRect } from '../common';
-export { uiTarsPlanning } from './ui-tars-planning';
 export {
   ConversationHistory,
   type ConversationHistoryOptions,
 } from './conversation-history';
 export type { SubGoal, SubGoalStatus } from '@/types';
 
-export type { AIArgs } from '../common';
+export type { AIArgs } from './types';
 
 export {
   getMidsceneLocationSchema,

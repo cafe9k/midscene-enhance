@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { PhotonImage as PhotonImageType } from '@silvia-odwyer/photon-node';
-import type { Rect } from 'src/types';
 import { getDebug } from '../logger';
+import type { Rect } from '../types';
 import { ifInNode } from '../utils';
 import getPhoton from './get-photon';
 import getSharp from './get-sharp';
@@ -154,8 +154,116 @@ export async function resizeAndConvertImgBuffer(
   };
 }
 
+export const normalizeBase64Body = (body: string) => body.replace(/\s/g, '');
+
+const base64ImageDataUrlPattern = /^data:image\/[a-zA-Z0-9.+-]+;base64,/i;
+const supportedScreenshotDataUriPattern =
+  /^data:image\/(png|jpe?g);base64,([\s\S]*)$/i;
+const rawBase64BodyPattern = /^[A-Za-z0-9+/=\s]+$/;
+
+export const inferBase64ImageFormat = (base64Body: string) => {
+  if (base64Body.startsWith('iVBORw0KGgo')) {
+    return 'png';
+  }
+  return 'jpeg';
+};
+
+function detectImageMimeTypeFromBuffer(buffer: Buffer): string | undefined {
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return 'image/jpeg';
+  }
+  if (buffer.length >= 6 && buffer.subarray(0, 3).toString('ascii') === 'GIF') {
+    return 'image/gif';
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  if (buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return 'image/bmp';
+  }
+  return undefined;
+}
+
 export const createImgBase64ByFormat = (format: string, body: string) => {
-  return `data:image/${format};base64,${body}`;
+  return `data:image/${format};base64,${normalizeBase64Body(body)}`;
+};
+
+export interface NormalizeScreenshotBase64Options {
+  label?: string;
+}
+
+export const normalizeScreenshotBase64 = (
+  base64: string,
+  options?: NormalizeScreenshotBase64Options,
+) => {
+  const label = options?.label ?? 'screenshot base64';
+  const trimmedBase64 = base64.trim();
+  if (!trimmedBase64) {
+    throw new Error(`${label} cannot be empty`);
+  }
+
+  const dataUriMatch = trimmedBase64.match(supportedScreenshotDataUriPattern);
+  if (dataUriMatch) {
+    const imageFormat =
+      dataUriMatch[1].toLowerCase() === 'jpg'
+        ? 'jpeg'
+        : dataUriMatch[1].toLowerCase();
+    const body = dataUriMatch[2];
+    if (!normalizeBase64Body(body)) {
+      throw new Error(`${label} cannot be empty`);
+    }
+    return createImgBase64ByFormat(imageFormat, body);
+  }
+
+  if (trimmedBase64.startsWith('data:')) {
+    throw new Error(
+      `${label} must be a PNG/JPEG data URI or raw PNG base64 string`,
+    );
+  }
+
+  if (!rawBase64BodyPattern.test(trimmedBase64)) {
+    throw new Error(
+      `${label} must be a PNG/JPEG data URI or raw PNG base64 string`,
+    );
+  }
+
+  return createImgBase64ByFormat('png', trimmedBase64);
+};
+
+export const normalizeBase64Image = (base64: string) => {
+  const trimmedBase64 = base64.trim();
+  if (base64ImageDataUrlPattern.test(trimmedBase64)) {
+    return trimmedBase64;
+  }
+
+  const base64Body = normalizeBase64Body(trimmedBase64);
+  assert(base64Body, 'base64 image must include image data');
+  return createImgBase64ByFormat(
+    inferBase64ImageFormat(base64Body),
+    base64Body,
+  );
 };
 
 export async function resizeImgBase64(
@@ -297,7 +405,6 @@ export async function paddingToMatchBlockByBase64(
 export async function cropByRect(
   imageBase64: string,
   rect: Rect,
-  paddingImage: boolean,
 ): Promise<{
   width: number;
   height: number;
@@ -312,18 +419,6 @@ export async function cropByRect(
   photonImage.free();
 
   try {
-    if (paddingImage) {
-      const paddedResult = await paddingToMatchBlock(cropped);
-      const result = {
-        width: paddedResult.width,
-        height: paddedResult.height,
-        imageBase64: await photonToBase64(paddedResult.image),
-      };
-      if (paddedResult.image !== cropped) {
-        paddedResult.image.free();
-      }
-      return result;
-    }
     return {
       width: cropped.get_width(),
       height: cropped.get_height(),
@@ -397,7 +492,8 @@ export const preProcessImageUrl = async (
     );
   }
   if (url.startsWith('data:')) {
-    return url;
+    const { mimeType, body } = parseBase64(url);
+    return `data:${mimeType};base64,${body}`;
   } else if (url.startsWith('http://') || url.startsWith('https://')) {
     if (!convertHttpImage2Base64) {
       return url;
@@ -421,12 +517,21 @@ export const parseBase64 = (
     const separator = ';base64,';
     const index = fullBase64String.indexOf(separator);
     if (index === -1) {
-      throw new Error('Invalid base64 string');
+      const body = normalizeBase64Body(fullBase64String);
+      const mimeType = detectImageMimeTypeFromBuffer(
+        Buffer.from(body, 'base64'),
+      );
+      if (!mimeType) {
+        throw new Error('Invalid base64 string');
+      }
+      return { mimeType, body };
     }
     return {
       // 5 means 'data:'
       mimeType: fullBase64String.slice(5, index),
-      body: fullBase64String.slice(index + separator.length),
+      body: normalizeBase64Body(
+        fullBase64String.slice(index + separator.length),
+      ),
     };
   } catch (e) {
     throw new Error(

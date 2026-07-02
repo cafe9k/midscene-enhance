@@ -28,8 +28,8 @@ describe('RemoteExecutionAdapter', () => {
   });
 
   describe('constructor', () => {
-    it('should use default port when no serverUrl provided', () => {
-      const defaultAdapter = new RemoteExecutionAdapter();
+    it('should construct without a configured serverUrl', () => {
+      const defaultAdapter = new RemoteExecutionAdapter('');
       expect(defaultAdapter).toBeDefined();
     });
 
@@ -148,7 +148,7 @@ describe('RemoteExecutionAdapter', () => {
     });
 
     it('should throw error when no server URL provided', async () => {
-      const adapterNoUrl = new RemoteExecutionAdapter();
+      const adapterNoUrl = new RemoteExecutionAdapter('');
       (adapterNoUrl as any).serverUrl = undefined;
 
       const value: FormValue = { type: 'click', prompt: 'click button' };
@@ -283,7 +283,7 @@ describe('RemoteExecutionAdapter', () => {
     });
 
     it('should return false when no server URL', async () => {
-      const adapterNoUrl = new RemoteExecutionAdapter();
+      const adapterNoUrl = new RemoteExecutionAdapter('');
       (adapterNoUrl as any).serverUrl = undefined;
 
       const result = await adapterNoUrl.checkStatus();
@@ -325,7 +325,7 @@ describe('RemoteExecutionAdapter', () => {
     });
 
     it('should throw error when no server URL', async () => {
-      const adapterNoUrl = new RemoteExecutionAdapter();
+      const adapterNoUrl = new RemoteExecutionAdapter('');
       (adapterNoUrl as any).serverUrl = undefined;
 
       const aiConfig = { model: 'test' };
@@ -360,32 +360,35 @@ describe('RemoteExecutionAdapter', () => {
     it('should call the connectivity test endpoint', async () => {
       const mockResult = {
         passed: true,
-        checks: [],
       };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve(mockResult),
       });
 
-      const result = await adapter.runConnectivityTest();
+      const aiConfig = { MIDSCENE_MODEL_NAME: 'test-model' };
+      const result = await adapter.runConnectivityTest(aiConfig);
 
       expect(result).toEqual(mockResult);
       expect(mockFetch).toHaveBeenCalledWith(
         `${mockServerUrl}/connectivity-test`,
         {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: aiConfig }),
         },
       );
     });
 
     it('should surface endpoint errors', async () => {
+      const aiConfig = { MIDSCENE_MODEL_NAME: 'test-model' };
       mockFetch.mockResolvedValueOnce({
         ok: false,
         statusText: 'Bad Request',
         json: () => Promise.resolve({ error: 'invalid config' }),
       });
 
-      await expect(adapter.runConnectivityTest()).rejects.toThrow(
+      await expect(adapter.runConnectivityTest(aiConfig)).rejects.toThrow(
         'invalid config',
       );
     });
@@ -408,7 +411,7 @@ describe('RemoteExecutionAdapter', () => {
     });
 
     it('should return undefined tip when no server URL', async () => {
-      const adapterNoUrl = new RemoteExecutionAdapter();
+      const adapterNoUrl = new RemoteExecutionAdapter('');
       (adapterNoUrl as any).serverUrl = undefined;
 
       const result = await adapterNoUrl.getTaskProgress('req-123');
@@ -466,7 +469,7 @@ describe('RemoteExecutionAdapter', () => {
     });
 
     it('should return error when no server URL', async () => {
-      const adapterNoUrl = new RemoteExecutionAdapter();
+      const adapterNoUrl = new RemoteExecutionAdapter('');
       (adapterNoUrl as any).serverUrl = undefined;
 
       const result = await adapterNoUrl.cancelTask('req-123');
@@ -640,6 +643,57 @@ describe('RemoteExecutionAdapter', () => {
       expect(consoleWarnSpy).not.toHaveBeenCalled();
 
       consoleWarnSpy.mockRestore();
+    });
+  });
+
+  describe('interact', () => {
+    it('POSTs JSON to /interact and returns ok', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      });
+
+      const result = await adapter.interact({
+        actionType: 'Tap',
+        x: 100,
+        y: 200,
+      });
+
+      expect(result).toEqual({ ok: true });
+      expect(mockFetch).toHaveBeenCalledWith(`${mockServerUrl}/interact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionType: 'Tap', x: 100, y: 200 }),
+      });
+    });
+
+    it('surfaces server-provided error message on non-ok responses', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({
+          error: 'Action "Foo" is not available',
+        }),
+      });
+
+      const result = await adapter.interact({ actionType: 'Foo' });
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('not available');
+    });
+
+    it('returns ok:false with a generic error when fetch rejects', async () => {
+      mockFetch.mockRejectedValueOnce(new Error('network down'));
+      const result = await adapter.interact({ actionType: 'Tap', x: 0, y: 0 });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe('network down');
+    });
+
+    it('refuses without serverUrl', async () => {
+      const noUrlAdapter = new RemoteExecutionAdapter('');
+      const result = await noUrlAdapter.interact({ actionType: 'Tap' });
+      expect(result.ok).toBe(false);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });

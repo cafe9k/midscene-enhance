@@ -1,4 +1,9 @@
 import type { Agent } from '@midscene/core/agent';
+import type {
+  MidsceneRecorderEvent,
+  MidsceneRecorderEventType,
+  MidsceneRecorderSourceKind,
+} from '@midscene/shared/recorder';
 import type { LaunchPlaygroundOptions } from './launcher';
 import type { AgentFactory } from './types';
 
@@ -64,6 +69,12 @@ export interface PlaygroundSessionField {
   description?: string;
 }
 
+export interface PlaygroundSessionNotice {
+  type: 'info' | 'warning' | 'error';
+  message: string;
+  description?: string;
+}
+
 export interface PlaygroundSessionSetup {
   title?: string;
   description?: string;
@@ -73,6 +84,7 @@ export interface PlaygroundSessionSetup {
   targets?: PlaygroundSessionTarget[];
   platformRegistry?: PlaygroundPlatformRegistration[];
   platformSelector?: PlaygroundPlatformSelectorConfig;
+  notice?: PlaygroundSessionNotice;
 }
 
 export interface PlaygroundExecutionHooks {
@@ -84,6 +96,132 @@ export interface PlaygroundSidecar {
   id: string;
   start(): void | Promise<void>;
   stop?(): void | Promise<void>;
+}
+
+export type PlaygroundRecorderSourceKind = MidsceneRecorderSourceKind;
+
+export type PlaygroundRecorderEventType = MidsceneRecorderEventType;
+
+export type PlaygroundRecorderEvent = MidsceneRecorderEvent;
+
+export interface PlaygroundRecorderCapabilitiesResult {
+  supported: boolean;
+  source: PlaygroundRecorderSourceKind;
+  platformId?: string;
+  error?: string;
+}
+
+export interface PlaygroundRecorderStartResult {
+  ok: boolean;
+  supported?: boolean;
+  source?: PlaygroundRecorderSourceKind;
+  platformId?: string;
+  error?: string;
+}
+
+export interface PlaygroundRecorderEventsResult {
+  events: PlaygroundRecorderEvent[];
+  nextIndex: number;
+}
+
+export interface PlaygroundRecorderDescribeTrace {
+  traceId: string;
+  eventHashId?: string;
+  eventType?: string;
+  actionType?: string;
+  eventSummary?: {
+    hashId?: string;
+    mergedHashIds?: string[];
+    type?: string;
+    source?: string;
+    actionType?: string;
+    timestamp?: number;
+    url?: string;
+    title?: string;
+    valueLength?: number;
+    rawPayloadSummary?: Record<string, unknown>;
+    elementRect?: {
+      left?: number;
+      top?: number;
+      width?: number;
+      height?: number;
+      x?: number;
+      y?: number;
+    };
+    pageInfo?: { width: number; height: number };
+  };
+  status: 'ready' | 'failed' | 'skipped';
+  error?: string;
+  startedAt: string;
+  durationMs: number;
+  modelCallDurationMs?: number;
+  point?: [number, number];
+  pageInfo?: { width: number; height: number };
+  screenshotBytes?: number;
+  screenshotRef?: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    mimeType?: string;
+  };
+  annotatedScreenshotRef?: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    mimeType?: string;
+  };
+  screenshotAnnotation?: {
+    inputPoint?: {
+      logical: [number, number];
+      screenshot: [number, number];
+    };
+    sourceTargetRect?: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+    locateRect?: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+    centerDelta?: {
+      x: number;
+      y: number;
+      distance: number;
+    };
+    distanceOutsideRect?: {
+      x: number;
+      y: number;
+      distance: number;
+    };
+  };
+  screenshotPersistError?: string;
+  annotatedScreenshotPersistError?: string;
+  elementDescription?: string;
+  verifyPassed?: boolean;
+  centerDistance?: number;
+  verifyResult?: {
+    pass?: boolean;
+    rect?: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+    center?: [number, number];
+    centerDistance?: number;
+    includedInRect?: boolean;
+  };
+}
+
+export interface PlaygroundRecorderDescribeResult {
+  ok: boolean;
+  event?: PlaygroundRecorderEvent;
+  trace?: PlaygroundRecorderDescribeTrace;
+  error?: string;
 }
 
 export interface PlaygroundSessionState {

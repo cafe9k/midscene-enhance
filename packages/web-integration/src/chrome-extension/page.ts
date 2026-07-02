@@ -13,7 +13,12 @@ import type {
   Rect,
   Size,
 } from '@midscene/core';
-import type { AbstractInterface, DeviceAction } from '@midscene/core/device';
+import type {
+  AbstractInterface,
+  DeviceAction,
+  FileChooserHandler,
+  FileChooserRegistration,
+} from '@midscene/core/device';
 import type { ElementInfo } from '@midscene/shared/extractor';
 import { treeToList } from '@midscene/shared/extractor';
 import { createImgBase64ByFormat } from '@midscene/shared/img';
@@ -45,6 +50,29 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function hasFlatNodeAttribute(
+  attributes: string[] | undefined,
+  name: string,
+): boolean {
+  if (!attributes) return false;
+  for (let i = 0; i < attributes.length; i += 2) {
+    if (attributes[i] === name) return true;
+  }
+  return false;
+}
+
+function serializeError(error: Error): {
+  message: string;
+  name?: string;
+  stack?: string;
+} {
+  return {
+    message: error.message,
+    name: error.name,
+    stack: error.stack,
+  };
+}
+
 export default class ChromeExtensionProxyPage implements AbstractInterface {
   interfaceType = 'chrome-extension-proxy';
 
@@ -55,6 +83,16 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
   private activeTabId: number | null = null;
 
   private destroyed = false;
+
+  private fileChooserEventHandler?: Parameters<
+    typeof chrome.debugger.onEvent.addListener
+  >[0];
+
+  private fileChooserRegistrationVersion = 0;
+
+  private bridgeFileChooserDispose?: () => void;
+
+  private bridgeFileChooserGetError?: FileChooserRegistration['getError'];
 
   private isMobileEmulation: boolean | null = null;
 
@@ -158,8 +196,17 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
     // Wait for debugger banner in Chrome to appear
     await sleep(500);
 
-    // Enable water flow animation
-    await this.enableWaterFlowAnimation();
+    // Enable water flow animation. Non-fatal: this is a purely visual
+    // overlay, and Chrome can briefly detach the debugger between
+    // attach() and the eval below (cross-origin navigation / Site
+    // Isolation race). If we awaited it and it threw "Debugger is not
+    // attached", the error would propagate out of the catch block in
+    // sendCommandToDebugger, preventing the actual CDP command from
+    // ever being retried. Fire-and-forget here so the lazy-attach
+    // retry can succeed even when the animation fails.
+    this.enableWaterFlowAnimation().catch((err) => {
+      console.warn('Failed to enable water flow animation:', err);
+    });
   }
 
   private async showMousePointer(x: number, y: number) {
@@ -351,6 +398,146 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
     });
   }
 
+  async registerFileChooserListener(
+    handler: (chooser: FileChooserHandler) => Promise<void>,
+  ): Promise<FileChooserRegistration> {
+    const registrationVersion = ++this.fileChooserRegistrationVersion;
+    const tabId = await this.getTabIdOrConnectToCurrentTab();
+
+    await this.ensureDebuggerAttached();
+    await this.sendCommandToDebugger('Page.enable', {});
+    await this.sendCommandToDebugger('DOM.enable', {});
+    await this.sendCommandToDebugger('Page.setInterceptFileChooserDialog', {
+      enabled: true,
+    });
+
+    if (this.fileChooserEventHandler) {
+      chrome.debugger.onEvent.removeListener(this.fileChooserEventHandler);
+      this.fileChooserEventHandler = undefined;
+    }
+
+    let capturedError: Error | undefined;
+    let pendingFileChooserHandling = Promise.resolve();
+
+    const fileChooserEventHandler: Parameters<
+      typeof chrome.debugger.onEvent.addListener
+    >[0] = (source, method, params) => {
+      if (source.tabId !== tabId || method !== 'Page.fileChooserOpened') {
+        return;
+      }
+
+      const event = params as CDPTypes.Page.FileChooserOpenedEvent;
+      if (event.backendNodeId === undefined) {
+        debug(
+          'chrome extension file chooser opened without backendNodeId, skip',
+        );
+        return;
+      }
+
+      const currentFileChooserHandling = (async () => {
+        try {
+          await handler({
+            accept: async (files: string[]) => {
+              const { node } = await this.sendCommandToDebugger<
+                CDPTypes.DOM.DescribeNodeResponse,
+                CDPTypes.DOM.DescribeNodeRequest
+              >('DOM.describeNode', {
+                backendNodeId: event.backendNodeId,
+              });
+
+              const hasWebkitDirectory =
+                hasFlatNodeAttribute(node.attributes, 'webkitdirectory') ||
+                hasFlatNodeAttribute(node.attributes, 'directory');
+              if (hasWebkitDirectory) {
+                throw new Error(
+                  'Directory upload (webkitdirectory) is not supported in Chrome extension bridge mode. Please use Playwright instead, which supports directory upload since version 1.45.',
+                );
+              }
+
+              if (
+                files.length > 1 &&
+                !hasFlatNodeAttribute(node.attributes, 'multiple')
+              ) {
+                throw new Error(
+                  'Non-multiple file input can only accept single file',
+                );
+              }
+
+              await this.sendCommandToDebugger('DOM.setFileInputFiles', {
+                files,
+                backendNodeId: event.backendNodeId,
+              });
+            },
+          });
+        } catch (error) {
+          capturedError =
+            error instanceof Error ? error : new Error(String(error));
+        }
+      })();
+      const previousFileChooserHandling = pendingFileChooserHandling;
+      pendingFileChooserHandling = Promise.all([
+        previousFileChooserHandling,
+        currentFileChooserHandling,
+      ]).then(() => {});
+    };
+
+    this.fileChooserEventHandler = fileChooserEventHandler;
+    chrome.debugger.onEvent.addListener(fileChooserEventHandler);
+
+    return {
+      dispose: () => {
+        if (this.fileChooserEventHandler !== fileChooserEventHandler) {
+          return;
+        }
+        chrome.debugger.onEvent.removeListener(fileChooserEventHandler);
+        this.fileChooserEventHandler = undefined;
+        Promise.resolve()
+          .then(() => {
+            if (this.fileChooserRegistrationVersion !== registrationVersion) {
+              return;
+            }
+            return this.sendCommandToDebugger(
+              'Page.setInterceptFileChooserDialog',
+              {
+                enabled: false,
+              },
+            );
+          })
+          .catch((error) => {
+            debug('failed to disable file chooser interception: %O', error);
+          });
+      },
+      getError: async () => {
+        await pendingFileChooserHandling;
+        return capturedError;
+      },
+    };
+  }
+
+  async registerFileChooserAccept(files: string[]): Promise<void> {
+    this.clearFileChooserAccept();
+    const { dispose, getError } = await this.registerFileChooserListener(
+      async (chooser) => {
+        await chooser.accept(files);
+      },
+    );
+    this.bridgeFileChooserDispose = dispose;
+    this.bridgeFileChooserGetError = getError;
+  }
+
+  clearFileChooserAccept(): void {
+    this.bridgeFileChooserDispose?.();
+    this.bridgeFileChooserDispose = undefined;
+    this.bridgeFileChooserGetError = undefined;
+  }
+
+  async getFileChooserError(): Promise<
+    { message: string; name?: string; stack?: string } | undefined
+  > {
+    const error = await this.bridgeFileChooserGetError?.();
+    return error ? serializeError(error) : undefined;
+  }
+
   async beforeInvokeAction(): Promise<void> {
     // current implementation is wait until domReadyState is complete
     try {
@@ -519,6 +706,23 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
     await this.waitUntilNetworkIdle();
   }
 
+  async goForward(): Promise<void> {
+    const tabId = await this.getTabIdOrConnectToCurrentTab();
+    await chrome.tabs.goForward(tabId);
+    // Wait for navigation to complete
+    await this.waitUntilNetworkIdle();
+  }
+
+  async stopLoading(): Promise<void> {
+    await this.sendCommandToDebugger('Page.stopLoading', {});
+  }
+
+  async navigationState(): Promise<{ isLoading: boolean }> {
+    const tabId = await this.getTabIdOrConnectToCurrentTab();
+    const tab = await chrome.tabs.get(tabId);
+    return { isLoading: tab.status === 'loading' };
+  }
+
   async scrollUntilTop(startingPoint?: Point) {
     if (startingPoint) {
       await this.mouse.move(startingPoint.left, startingPoint.top);
@@ -655,21 +859,24 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
       } else {
         // standard mousePressed + mouseReleased
         for (let i = 0; i < count; i++) {
+          const clickCount = i + 1;
           await this.sendCommandToDebugger('Input.dispatchMouseEvent', {
             type: 'mousePressed',
             x,
             y,
             button,
-            clickCount: 1,
+            clickCount,
           });
           await this.sendCommandToDebugger('Input.dispatchMouseEvent', {
             type: 'mouseReleased',
             x,
             y,
             button,
-            clickCount: 1,
+            clickCount,
           });
-          await sleep(50);
+          if (i < count - 1) {
+            await sleep(50);
+          }
         }
       }
     },
@@ -769,6 +976,7 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    this.clearFileChooserAccept();
     const tabIdToDetach = this.activeTabId;
     this.activeTabId = null;
     if (tabIdToDetach) {
@@ -778,13 +986,12 @@ export default class ChromeExtensionProxyPage implements AbstractInterface {
 
   async longPress(x: number, y: number, duration?: number) {
     duration = duration || 500;
-    const LONG_PRESS_THRESHOLD = 600;
-    const MIN_PRESS_THRESHOLD = 300;
-    if (duration > LONG_PRESS_THRESHOLD) {
-      duration = LONG_PRESS_THRESHOLD;
-    }
-    if (duration < MIN_PRESS_THRESHOLD) {
-      duration = MIN_PRESS_THRESHOLD;
+    // Keep a lower bound so the press is registered as a long press rather than
+    // a click, but never cap the upper bound: the duration is the caller's
+    // intent (e.g. "hold for 6 seconds").
+    const MIN_LONG_PRESS_DURATION = 300;
+    if (duration < MIN_LONG_PRESS_DURATION) {
+      duration = MIN_LONG_PRESS_DURATION;
     }
     await this.mouse.move(x, y);
 

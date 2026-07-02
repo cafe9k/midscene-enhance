@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import {
   CLIError,
   parseCliArgs,
@@ -7,6 +8,7 @@ import {
   runToolsCLI,
 } from '@/cli';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 describe('parseValue', () => {
   it('parses JSON objects', () => {
@@ -185,9 +187,46 @@ describe('parseCliArgs', () => {
     });
   });
 
+  it('accumulates repeated flags into arrays', () => {
+    expect(
+      parseCliArgs([
+        '--image',
+        './a.png',
+        '--image',
+        './b.png',
+        '--image-name',
+        'a',
+        '--image-name',
+        'b',
+      ]),
+    ).toEqual({
+      image: ['./a.png', './b.png'],
+      'image-name': ['a', 'b'],
+    });
+  });
+
   it('preserves dotted kebab-case keys as flat args', () => {
     expect(parseCliArgs(['--android.device-id', '127.0.0.1:7555'])).toEqual({
       'android.device-id': '127.0.0.1:7555',
+    });
+  });
+
+  it('accumulates repeated flags into an array', () => {
+    expect(
+      parseCliArgs([
+        '--htmlReport',
+        'a.html',
+        '--htmlReport',
+        'b.html',
+        '--htmlReport',
+        'c.html',
+      ]),
+    ).toEqual({ htmlReport: ['a.html', 'b.html', 'c.html'] });
+  });
+
+  it('accumulates repeated --key=value into an array', () => {
+    expect(parseCliArgs(['--report=a.html', '--report=b.html'])).toEqual({
+      report: ['a.html', 'b.html'],
     });
   });
 });
@@ -311,6 +350,125 @@ describe('runToolsCLI', () => {
     });
 
     expect(consoleSpy).toHaveBeenCalledWith('test-cli v1.2.3');
+    consoleSpy.mockRestore();
+  });
+
+  it('strips a global --deep-locate flag and applies deep locate defaults', async () => {
+    const handler = vi
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    // The flag is placed before the command; it must be removed so 'tap'
+    // resolves as the command instead of being treated as unknown.
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--deep-locate', 'tap', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('strips --deep-locate even when it follows the command', async () => {
+    const handler = vi
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['tap', '--deep-locate', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('does not set tool defaults without a behavior flag', async () => {
+    const handler = vi
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    tools.setToolDefaults = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['tap', '--locate', 'btn'],
+    });
+
+    expect(tools.setToolDefaults).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('writes image tool results with an extension matching the mime type', async () => {
+    const handler = vi.fn().mockResolvedValue({
+      content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/jpeg' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'take_screenshot', handler }]);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', { argv: ['take_screenshot'] });
+
+    const message = consoleSpy.mock.calls
+      .map(([line]) => String(line))
+      .find((line) => line.startsWith('Screenshot saved: '));
+    expect(message).toMatch(/^Screenshot saved: .+screenshot-\d+\.jpeg$/);
+    const screenshotPath = message?.replace('Screenshot saved: ', '');
+    expect(screenshotPath).toBeDefined();
+    expect(existsSync(screenshotPath!)).toBe(true);
+    expect(readFileSync(screenshotPath!, 'utf8')).toBe('hello');
+    consoleSpy.mockRestore();
+  });
+
+  it('strips a global --deep-think flag and applies act defaults', async () => {
+    const handler = vi
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'act', handler }]);
+    tools.setToolDefaults = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--deep-think', 'act', '--prompt', 'open settings'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      act: { deepThink: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+    consoleSpy.mockRestore();
+  });
+
+  it('merges defaults when both flags are present', async () => {
+    const handler = vi
+      .fn()
+      .mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    const tools = createMockTools([{ name: 'act', handler }]);
+    tools.setToolDefaults = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['act', '--deep-locate', '--deep-think', '--prompt', 'go'],
+    });
+
+    expect(tools.setToolDefaults).toHaveBeenCalledWith({
+      locate: { deepLocate: true },
+      act: { deepLocate: true, deepThink: true },
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
     consoleSpy.mockRestore();
   });
 
@@ -505,6 +663,64 @@ describe('runToolsCLI', () => {
     consoleSpy.mockRestore();
   });
 
+  it('strips global --verbose and emits readable progress lines', async () => {
+    const handler = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Connected' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'connect', handler }]);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: ['--verbose', 'connect', '--url', 'https://example.com'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({ url: 'https://example.com' });
+    const messages = consoleSpy.mock.calls.map(([message]) => String(message));
+    expect(messages).toEqual([
+      '[Midscene] connect started (url=https://example.com)',
+      'Connected',
+      expect.stringMatching(/^\[Midscene\] connect finished in \d+ms$/),
+    ]);
+    consoleSpy.mockRestore();
+  });
+
+  it('preserves structured command args in jsonl verbose progress events', async () => {
+    const handler = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Tapped' }],
+      isError: false,
+    });
+    const tools = createMockTools([{ name: 'tap', handler }]);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: [
+        '--verbose=jsonl',
+        'tap',
+        '--locate',
+        '{"prompt":"Submit","deepLocate":true}',
+      ],
+    });
+
+    const progressEvents = consoleSpy.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes('"type":"midscene_progress"'))
+      .map((message) => JSON.parse(message));
+    expect(progressEvents[0]).toMatchObject({
+      event: 'command_start',
+      type: 'midscene_progress',
+      scriptName: 'test-cli',
+      command: 'tap',
+      args: {
+        locate: {
+          prompt: 'Submit',
+          deepLocate: true,
+        },
+      },
+    });
+    consoleSpy.mockRestore();
+  });
+
   it('strips platform prefix from command names', async () => {
     const handler = vi.fn().mockResolvedValue({
       content: [{ type: 'text', text: 'ok' }],
@@ -555,6 +771,38 @@ describe('runToolsCLI', () => {
     vi.restoreAllMocks();
   });
 
+  it('calls destroy when a command handler throws', async () => {
+    const handler = vi.fn().mockRejectedValue(new Error('boom'));
+    const tools = createMockTools([{ name: 'explode', handler }]);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: ['--verbose', 'explode'],
+      }),
+    ).rejects.toThrow('boom');
+
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
+
+  it('emits an aiAct failure line when an act command throws by default', async () => {
+    const handler = vi.fn().mockRejectedValue(new Error('boom'));
+    const tools = createMockTools([{ name: 'act', handler }]);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: ['act'],
+      }),
+    ).rejects.toThrow('boom');
+
+    const messages = consoleSpy.mock.calls.map(([message]) => String(message));
+    expect(messages).toContain('[Midscene][aiAct] Failed: boom');
+    expect(tools.destroy).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
+
   it('matches commands case-insensitively', async () => {
     const handler = vi.fn().mockResolvedValue({
       content: [{ type: 'text', text: 'tapped' }],
@@ -599,7 +847,13 @@ describe('runToolsCLI', () => {
     expect(output).toContain('  tap');
     expect(output).toContain('  scroll');
     // Command names column should not have uppercase originals
-    const commandLines = output.split('\n').filter((l) => l.startsWith('  '));
+    const commandLines = output
+      .split('\n')
+      .slice(
+        output.split('\n').indexOf('Commands:') + 1,
+        output.split('\n').indexOf('Global Options:'),
+      )
+      .filter((l) => l.startsWith('  '));
     for (const line of commandLines) {
       const cmdName = line.trimStart().split(/\s{2,}/)[0];
       expect(cmdName).toBe(cmdName.toLowerCase());
@@ -660,5 +914,120 @@ describe('runToolsCLI', () => {
     });
     expect(consoleSpy).toHaveBeenCalledWith('split done');
     consoleSpy.mockRestore();
+  });
+
+  it('canonicalizes kebab-case spellings to schema keys before dispatch', async () => {
+    const handler = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
+    });
+    const tools = {
+      initTools: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      getToolDefinitions: vi.fn().mockReturnValue([
+        {
+          name: 'assert',
+          description: 'assert',
+          schema: {
+            prompt: z.string(),
+            imageName: z.union([z.string(), z.array(z.string())]).optional(),
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'test-cli', {
+      argv: [
+        'assert',
+        '--prompt',
+        'p',
+        '--image-name',
+        'a',
+        '--image-name',
+        'b',
+      ],
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      prompt: 'p',
+      imageName: ['a', 'b'],
+    });
+    vi.restoreAllMocks();
+  });
+
+  it('canonicalizes preferredName/aliases for namespaced fields', async () => {
+    const handler = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false,
+    });
+    const tools = {
+      initTools: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      getToolDefinitions: vi.fn().mockReturnValue([
+        {
+          name: 'android_connect',
+          description: 'connect',
+          schema: { 'android.deviceId': z.string().optional() },
+          cli: {
+            options: {
+              'android.deviceId': {
+                preferredName: 'device-id',
+                aliases: ['deviceId'],
+              },
+            },
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runToolsCLI(tools, 'midscene-android', {
+      stripPrefix: 'android_',
+      argv: ['connect', '--device-id', 'emulator-5554'],
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      'android.deviceId': 'emulator-5554',
+    });
+    vi.restoreAllMocks();
+  });
+
+  it('throws CLIError when the same field is set under conflicting spellings', async () => {
+    const handler = vi.fn();
+    const tools = {
+      initTools: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+      getToolDefinitions: vi.fn().mockReturnValue([
+        {
+          name: 'assert',
+          description: 'assert',
+          schema: {
+            prompt: z.string(),
+            imageName: z.string().optional(),
+          },
+          handler,
+        },
+      ]),
+    } as any;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      runToolsCLI(tools, 'test-cli', {
+        argv: [
+          'assert',
+          '--prompt',
+          'p',
+          '--imageName',
+          'camel',
+          '--image-name',
+          'kebab',
+        ],
+      }),
+    ).rejects.toThrow(/Conflicting CLI options.*image-name/);
+    expect(handler).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
   });
 });

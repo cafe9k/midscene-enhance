@@ -7,24 +7,17 @@ import type {
 } from '@midscene/core';
 import {
   type AbstractInterface,
-  type ActionInputParam,
-  type ActionKeyboardPressParam,
-  type ActionTapParam,
-  actionTapParamSchema,
+  type ComputerInputPrimitives,
   defineAction,
-  defineActionClearInput,
-  defineActionDoubleClick,
-  defineActionDragAndDrop,
-  defineActionHover,
-  defineActionInput,
-  defineActionKeyboardPress,
-  defineActionRightClick,
-  defineActionScroll,
-  defineActionTap,
+  defineActionsFromInputPrimitives,
 } from '@midscene/core/device';
 import { sleep } from '@midscene/core/utils';
 import { getDebug } from '@midscene/shared/logger';
 import type { DisplayInfo } from '../device';
+import {
+  formatRdpServerAddress,
+  normalizeRdpConnectionConfig,
+} from './address';
 import { createDefaultRDPBackendClient } from './backend-client';
 import type {
   RDPBackendClient,
@@ -49,6 +42,7 @@ const INPUT_CLEAR_DELAY = 150;
 const SCROLL_STEP_DELAY = 100;
 const SCROLL_COMPLETE_DELAY = 500;
 const DEFAULT_SCROLL_DISTANCE = 480;
+const DEFAULT_SCROLL_VIEWPORT_RATIO = 0.7;
 const EDGE_SCROLL_STEPS = 10;
 const DEFAULT_SCROLL_STEP_AMOUNT = 120;
 
@@ -67,25 +61,154 @@ export class RDPDevice implements AbstractInterface {
   private cursorPosition?: [number, number];
   uri?: string;
 
+  readonly inputPrimitives: ComputerInputPrimitives = {
+    pointer: {
+      tap: async ({ x, y }) => {
+        await this.movePointer(Math.round(x), Math.round(y), {
+          steps: SMOOTH_MOVE_STEPS_TAP,
+          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
+        });
+        await this.backend.mouseButton('left', 'down');
+        await sleep(CLICK_HOLD_DURATION);
+        await this.backend.mouseButton('left', 'up');
+      },
+      doubleClick: async ({ x, y }) => {
+        await this.movePointer(Math.round(x), Math.round(y), {
+          steps: SMOOTH_MOVE_STEPS_TAP,
+          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
+        });
+        await this.backend.mouseButton('left', 'doubleClick');
+      },
+      rightClick: async ({ x, y }) => {
+        await this.movePointer(Math.round(x), Math.round(y), {
+          steps: SMOOTH_MOVE_STEPS_TAP,
+          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
+        });
+        await this.backend.mouseButton('right', 'click');
+      },
+      hover: async ({ x, y }) => {
+        await this.movePointer(Math.round(x), Math.round(y), {
+          steps: SMOOTH_MOVE_STEPS_MOUSE_MOVE,
+          stepDelayMs: SMOOTH_MOVE_DELAY_MOUSE_MOVE,
+          settleDelayMs: MOUSE_MOVE_EFFECT_WAIT,
+        });
+      },
+      dragAndDrop: async (from, to) => {
+        await this.movePointer(Math.round(from.x), Math.round(from.y), {
+          steps: SMOOTH_MOVE_STEPS_TAP,
+          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
+        });
+        await this.backend.mouseButton('left', 'down');
+        await sleep(DRAG_HOLD_DURATION);
+        await this.movePointer(Math.round(to.x), Math.round(to.y), {
+          steps: SMOOTH_MOVE_STEPS_DRAG,
+          stepDelayMs: SMOOTH_MOVE_DELAY_DRAG,
+        });
+        await sleep(DRAG_HOLD_DURATION);
+        await this.backend.mouseButton('left', 'up');
+      },
+    },
+    keyboard: {
+      typeText: async (value, opts) => {
+        this.assertConnected();
+        const target = opts?.target as LocateResultElement | undefined;
+        if (target) {
+          await this.inputPrimitives.pointer!.tap({
+            x: target.center[0],
+            y: target.center[1],
+          });
+          await sleep(INPUT_FOCUS_DELAY);
+        }
+        if (opts?.replace !== false) {
+          await this.clearInput();
+          await sleep(INPUT_CLEAR_DELAY);
+        }
+        if (opts?.focusOnly || !value) {
+          return;
+        }
+        await this.backend.typeText(value);
+      },
+      clearInput: async (target) => {
+        this.assertConnected();
+        const element = target as LocateResultElement | undefined;
+        if (element) {
+          await this.inputPrimitives.pointer!.tap({
+            x: element.center[0],
+            y: element.center[1],
+          });
+          await sleep(INPUT_FOCUS_DELAY);
+        }
+        await this.clearInput();
+        await sleep(INPUT_CLEAR_DELAY);
+      },
+      keyboardPress: async (keyName, opts) => {
+        this.assertConnected();
+        const target = opts?.target as LocateResultElement | undefined;
+        if (target) {
+          await this.inputPrimitives.pointer!.tap({
+            x: target.center[0],
+            y: target.center[1],
+          });
+        }
+        await this.backend.keyPress(keyName);
+      },
+    },
+    scroll: {
+      scroll: async (param) => {
+        this.assertConnected();
+        const target = param.locate;
+        if (target) {
+          await this.moveToElement(target, {
+            steps: SMOOTH_MOVE_STEPS_MOUSE_MOVE,
+            stepDelayMs: SMOOTH_MOVE_DELAY_MOUSE_MOVE,
+          });
+        }
+        if (param.scrollType && param.scrollType !== 'singleAction') {
+          const direction = this.edgeScrollDirection(param.scrollType);
+          for (let i = 0; i < EDGE_SCROLL_STEPS; i++) {
+            await this.performWheel(
+              direction,
+              DEFAULT_SCROLL_DISTANCE,
+              target?.center[0],
+              target?.center[1],
+            );
+          }
+          await sleep(SCROLL_COMPLETE_DELAY);
+          return;
+        }
+        await this.performWheel(
+          param.direction || 'down',
+          param.distance ||
+            this.defaultScrollDistance(param.direction || 'down'),
+          target?.center[0],
+          target?.center[1],
+        );
+        await sleep(SCROLL_COMPLETE_DELAY);
+      },
+    },
+  };
+
   constructor(options: RDPDeviceOpt) {
+    const normalizedOptions = normalizeRdpConnectionConfig(options);
     this.options = {
       port: 3389,
       securityProtocol: 'auto',
       ignoreCertificate: false,
-      ...options,
+      ...normalizedOptions,
     };
     this.backend = options.backend || createDefaultRDPBackendClient();
   }
 
   describe(): string {
     const port = this.options.port || 3389;
+    const server = formatRdpServerAddress(this.options.host, port);
     const username = this.options.username
       ? ` as ${this.options.username}`
       : '';
     const session = this.connectionInfo?.sessionId
       ? ` [session ${this.connectionInfo.sessionId}]`
       : '';
-    return `RDP Device ${this.options.host}:${port}${username}${session}`;
+    return `RDP Device ${server}${username}${session}`;
   }
 
   async connect(): Promise<void> {
@@ -95,7 +218,16 @@ export class RDPDevice implements AbstractInterface {
       port: this.options.port,
       username: this.options.username,
     });
-    this.connectionInfo = await this.backend.connect(this.options);
+    // Only forward serializable connection settings. `backend` and
+    // `customActions` are runtime objects (the backend instance even holds a
+    // live child process with circular references); leaking them into the
+    // config sent over the helper's JSON protocol corrupts the request line.
+    const {
+      backend: _backend,
+      customActions: _customActions,
+      ...config
+    } = this.options;
+    this.connectionInfo = await this.backend.connect(config);
     this.cursorPosition = [
       Math.round(this.connectionInfo.size.width / 2),
       Math.round(this.connectionInfo.size.height / 2),
@@ -124,160 +256,23 @@ export class RDPDevice implements AbstractInterface {
 
   actionSpace(): DeviceAction<any>[] {
     const defaultActions: DeviceAction<any>[] = [
-      defineActionTap(async ({ locate }) => {
-        const element = this.requireLocate(locate, 'tap');
-        await this.moveToElement(element, {
-          steps: SMOOTH_MOVE_STEPS_TAP,
-          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-        });
-        await this.backend.mouseButton('left', 'down');
-        await sleep(CLICK_HOLD_DURATION);
-        await this.backend.mouseButton('left', 'up');
-      }),
-      defineActionDoubleClick(async ({ locate }) => {
-        const element = this.requireLocate(locate, 'double click');
-        await this.moveToElement(element, {
-          steps: SMOOTH_MOVE_STEPS_TAP,
-          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-        });
-        await this.backend.mouseButton('left', 'doubleClick');
-      }),
-      defineActionRightClick(async ({ locate }) => {
-        const element = this.requireLocate(locate, 'right click');
-        await this.moveToElement(element, {
-          steps: SMOOTH_MOVE_STEPS_TAP,
-          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-        });
-        await this.backend.mouseButton('right', 'click');
-      }),
-      defineActionHover(async ({ locate }) => {
-        const element = this.requireLocate(locate, 'hover');
-        await this.moveToElement(element, {
-          steps: SMOOTH_MOVE_STEPS_MOUSE_MOVE,
-          stepDelayMs: SMOOTH_MOVE_DELAY_MOUSE_MOVE,
-          settleDelayMs: MOUSE_MOVE_EFFECT_WAIT,
-        });
-      }),
-      defineActionInput(async (param: ActionInputParam) => {
-        this.assertConnected();
-        if (param.locate) {
-          await this.moveToElement(param.locate, {
-            steps: SMOOTH_MOVE_STEPS_TAP,
-            stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-          });
-          await this.backend.mouseButton('left', 'click');
-          await sleep(INPUT_FOCUS_DELAY);
-        }
-        if (param.mode !== 'typeOnly') {
-          await this.clearInput();
-          await sleep(INPUT_CLEAR_DELAY);
-        }
-        if (param.mode === 'clear') {
-          return;
-        }
-        if (param.value) {
-          await this.backend.typeText(param.value);
-        }
-      }),
-      defineActionClearInput(async ({ locate }) => {
-        this.assertConnected();
-        if (locate) {
-          await this.moveToElement(locate, {
-            steps: SMOOTH_MOVE_STEPS_TAP,
-            stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-          });
-          await this.backend.mouseButton('left', 'click');
-          await sleep(INPUT_FOCUS_DELAY);
-        }
-        await this.clearInput();
-        await sleep(INPUT_CLEAR_DELAY);
-      }),
-      defineActionKeyboardPress(
-        async ({ locate, keyName }: ActionKeyboardPressParam) => {
-          this.assertConnected();
-          if (locate) {
-            await this.moveToElement(locate, {
-              steps: SMOOTH_MOVE_STEPS_TAP,
-              stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-            });
-            await this.backend.mouseButton('left', 'click');
-          }
-          await this.backend.keyPress(keyName);
-        },
-      ),
-      defineActionScroll(async (param: ActionScrollParam) => {
-        this.assertConnected();
-        const target = param.locate;
-        if (target) {
-          await this.moveToElement(target, {
-            steps: SMOOTH_MOVE_STEPS_MOUSE_MOVE,
-            stepDelayMs: SMOOTH_MOVE_DELAY_MOUSE_MOVE,
-          });
-        }
-        if (param.scrollType && param.scrollType !== 'singleAction') {
-          const direction = this.edgeScrollDirection(param.scrollType);
-          for (let i = 0; i < EDGE_SCROLL_STEPS; i++) {
-            await this.performWheel(
-              direction,
-              DEFAULT_SCROLL_DISTANCE,
-              target?.center[0],
-              target?.center[1],
-            );
-          }
-          await sleep(SCROLL_COMPLETE_DELAY);
-          return;
-        }
-        await this.performWheel(
-          param.direction || 'down',
-          param.distance || DEFAULT_SCROLL_DISTANCE,
-          target?.center[0],
-          target?.center[1],
-        );
-        await sleep(SCROLL_COMPLETE_DELAY);
-      }),
-      defineActionDragAndDrop(async ({ from, to }) => {
-        this.assertConnected();
-        const source = this.requireLocate(from, 'drag source');
-        const target = this.requireLocate(to, 'drag target');
-        await this.moveToElement(source, {
-          steps: SMOOTH_MOVE_STEPS_TAP,
-          stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-        });
-        await this.backend.mouseButton('left', 'down');
-        await sleep(DRAG_HOLD_DURATION);
-        await this.moveToElement(target, {
-          steps: SMOOTH_MOVE_STEPS_DRAG,
-          stepDelayMs: SMOOTH_MOVE_DELAY_DRAG,
-        });
-        await sleep(DRAG_HOLD_DURATION);
-        await this.backend.mouseButton('left', 'up');
-      }),
-      defineAction<typeof actionTapParamSchema, ActionTapParam>({
-        name: 'MiddleClick',
-        description: 'Middle click the element',
-        sample: {
-          locate: { prompt: 'the browser tab close target' },
-        },
-        paramSchema: actionTapParamSchema,
-        call: async ({ locate }) => {
-          const element = this.requireLocate(locate, 'middle click');
-          await this.moveToElement(element, {
-            steps: SMOOTH_MOVE_STEPS_TAP,
-            stepDelayMs: SMOOTH_MOVE_DELAY_TAP,
-          });
-          await this.backend.mouseButton('middle', 'click');
-        },
-      }),
+      ...defineActionsFromInputPrimitives(this.inputPrimitives),
       defineAction({
         name: 'ListDisplays',
         description: 'List all available displays/monitors',
         call: async (): Promise<DisplayInfo[]> => {
           this.assertConnected();
           const size = await this.size();
+          const server =
+            this.connectionInfo?.server ||
+            formatRdpServerAddress(
+              this.options.host,
+              this.options.port || 3389,
+            );
           return [
             {
               id: this.connectionInfo?.sessionId || this.options.host,
-              name: `RDP ${this.connectionInfo?.server || this.options.host} (${size.width}x${size.height})`,
+              name: `RDP ${server} (${size.width}x${size.height})`,
               primary: true,
             },
           ];
@@ -299,16 +294,6 @@ export class RDPDevice implements AbstractInterface {
     if (this.destroyed) {
       throw new Error('RDPDevice has been destroyed');
     }
-  }
-
-  private requireLocate(
-    locate: LocateResultElement | undefined,
-    actionName: string,
-  ): LocateResultElement {
-    if (!locate) {
-      throw new Error(`Missing target element for ${actionName}`);
-    }
-    return locate;
   }
 
   private async moveToElement(
@@ -351,6 +336,16 @@ export class RDPDevice implements AbstractInterface {
       default:
         throw new Error(`Unsupported scroll type: ${scrollType}`);
     }
+  }
+
+  private defaultScrollDistance(direction: RDPScrollDirection): number {
+    const size = this.connectionInfo?.size;
+    if (!size) {
+      return DEFAULT_SCROLL_DISTANCE;
+    }
+    const isHorizontal = direction === 'left' || direction === 'right';
+    const base = isHorizontal ? size.width : size.height;
+    return Math.max(1, Math.round(base * DEFAULT_SCROLL_VIEWPORT_RATIO));
   }
 
   private async movePointer(

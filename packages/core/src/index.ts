@@ -15,7 +15,6 @@ export {
   TUserPromptSchema,
   type TMultimodalPrompt,
   type TUserPrompt,
-  type ConnectivityCheckResultItem,
   type ConnectivityTestConfig,
   type ConnectivityTestResult,
 } from './ai-model/index';
@@ -57,7 +56,23 @@ export type {
   DetailedLocateParam,
 } from './yaml';
 
-export { Agent, type AgentOpt, type AiActOptions, createAgent } from './agent';
+export {
+  Agent,
+  type AgentOpt,
+  type AiActOptions,
+  type GherkinStepKeyword,
+  type RunGherkinScenarioOptions,
+  createAgent,
+} from './agent';
+export {
+  describeElementAtPoint,
+  verifyElementDescriptionAtPoint,
+  verifyLocator,
+  type DescribeElementAtPointOptions,
+  type DescribeElementCoordinateSpace,
+  type ElementDescriberRuntime,
+  type VerifyElementDescriptionAtPointOptions,
+} from './element-describer';
 
 // Dump utilities
 export {
@@ -69,7 +84,14 @@ export {
   parseDumpScriptAttributes,
   generateImageScriptTag,
   generateDumpScriptTag,
+  deriveTaskStatus,
+  deriveCaseStatus,
 } from './dump';
+export type { TaskStatusFields, DerivedTaskStatus } from './dump';
+export {
+  getTaskSearchArea,
+  getTaskServiceDump,
+} from './dump/task-service-dump';
 
 // Report generator
 export type { IReportGenerator } from './report-generator';
@@ -84,11 +106,14 @@ export {
   createReportCliCommands,
   reportFileToMarkdown,
   splitReportFile,
+  mergeReportFiles,
   type ConsumeReportFileAction,
   type ReportFileToMarkdownOptions,
   type ReportCliCommandDefinition,
   type ReportCliCommandEntry,
   type SplitReportFileOptions,
+  type MergeReportFilesOptions,
+  type MergeReportFilesResult,
 } from './report-cli';
 
 // ScreenshotItem

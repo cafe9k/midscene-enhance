@@ -69,6 +69,68 @@ describe('player action dispatch ordering', () => {
     expect(agent.runAdbShell).not.toHaveBeenCalled();
   });
 
+  it('should dispatch RunAdbShell timeout as a shallow sibling option', async () => {
+    const actionSpace = [
+      {
+        name: 'RunAdbShell',
+        interfaceAlias: 'runAdbShell',
+        paramSchema: runAdbShellParamSchema,
+      },
+    ];
+    const player = createPlayerWithActionSpace(actionSpace);
+    const agent = createMockAgent();
+
+    const taskStatus = {
+      name: 'test',
+      flow: [
+        {
+          runAdbShell: 'dumpsys activity services',
+          timeout: 60_000,
+          name: 'services',
+        },
+      ],
+      index: 0,
+      status: 'running' as const,
+      totalSteps: 1,
+    };
+
+    await player.playTask(taskStatus, agent);
+
+    expect(agent.runAdbShell).toHaveBeenCalledWith(
+      'dumpsys activity services',
+      { timeout: 60_000 },
+    );
+    expect(agent.callActionInActionSpace).not.toHaveBeenCalled();
+    expect(player.result.services).toBe('adb-result');
+  });
+
+  it('should not treat uppercase RunAdbShell as the YAML timeout helper', async () => {
+    const actionSpace = [
+      {
+        name: 'RunAdbShell',
+        interfaceAlias: 'runAdbShell',
+        paramSchema: runAdbShellParamSchema,
+      },
+    ];
+    const player = createPlayerWithActionSpace(actionSpace);
+    const agent = createMockAgent();
+
+    const taskStatus = {
+      name: 'test',
+      flow: [{ RunAdbShell: 'dumpsys activity services', timeout: 60_000 }],
+      index: 0,
+      status: 'running' as const,
+      totalSteps: 1,
+    };
+
+    await player.playTask(taskStatus, agent);
+
+    expect(agent.runAdbShell).not.toHaveBeenCalled();
+    expect(agent.callActionInActionSpace).toHaveBeenCalledWith('RunAdbShell', {
+      command: 'dumpsys activity services',
+    });
+  });
+
   it('should dispatch Launch string param via callActionInActionSpace', async () => {
     const actionSpace = [
       {
@@ -289,6 +351,99 @@ describe('player action dispatch ordering', () => {
     });
   });
 
+  describe('player task dispatch without runtime result interpolation', () => {
+    it('should pass $var text through as a literal value', async () => {
+      const player = createPlayerWithActionSpace([]);
+      const agent = createMockAgent();
+      player.result.product_id = '110';
+
+      const taskStatus = {
+        name: 'test',
+        flow: [{ aiInput: 'search box', value: '$product_id' }],
+        index: 0,
+        status: 'running' as const,
+        totalSteps: 1,
+      };
+
+      await player.playTask(taskStatus, agent);
+
+      expect(agent.callActionInActionSpace).toHaveBeenCalledWith(
+        'Input',
+        expect.objectContaining({ value: '$product_id' }),
+      );
+    });
+
+    it('should pass ${var} text through as a literal value', async () => {
+      const player = createPlayerWithActionSpace([]);
+      const agent = createMockAgent({
+        aiQuery: vi.fn().mockResolvedValue('query-result'),
+      });
+      player.result.product_id = '110';
+
+      const taskStatus = {
+        name: 'test',
+        flow: [{ aiQuery: 'search for product-${product_id}', name: 'result' }],
+        index: 0,
+        status: 'running' as const,
+        totalSteps: 1,
+      };
+
+      await player.playTask(taskStatus, agent);
+
+      expect(agent.aiQuery).toHaveBeenCalledWith(
+        'search for product-${product_id}',
+        expect.anything(),
+      );
+    });
+
+    it('should not throw when a literal variable-like value is undefined', async () => {
+      const player = createPlayerWithActionSpace([]);
+      const agent = createMockAgent();
+
+      const taskStatus = {
+        name: 'test',
+        flow: [{ aiInput: 'search box', value: '$undefined_var' }],
+        index: 0,
+        status: 'running' as const,
+        totalSteps: 1,
+      };
+
+      await player.playTask(taskStatus, agent);
+
+      expect(agent.callActionInActionSpace).toHaveBeenCalledWith(
+        'Input',
+        expect.objectContaining({ value: '$undefined_var' }),
+      );
+    });
+
+    it('should pass variable-like values through in nested objects', async () => {
+      const player = createPlayerWithActionSpace([]);
+      const agent = createMockAgent({
+        aiTap: vi.fn().mockResolvedValue('tap-result'),
+      });
+      player.result.prompt_text = 'search box';
+
+      const taskStatus = {
+        name: 'test',
+        flow: [
+          {
+            aiTap: { prompt: '$prompt_text' },
+          },
+        ],
+        index: 0,
+        status: 'running' as const,
+        totalSteps: 1,
+      };
+
+      await player.playTask(taskStatus, agent);
+
+      expect(agent.aiTap).toHaveBeenCalledWith(
+        '$prompt_text',
+        expect.anything(),
+      );
+    });
+  });
+
   it('round-trip: cached plan → buildYamlFlowFromPlans → player dispatches with correct param', async () => {
     // Regression for the cache-replay bug: a Terminate plan was serialized as
     // { terminate: '', uri: '...' }, then replayed as agent.terminate('').
@@ -326,7 +481,6 @@ describe('player action dispatch ordering', () => {
       {
         name: 'test',
         flow,
-        index: 0,
         status: 'running' as const,
         totalSteps: flow.length,
       },

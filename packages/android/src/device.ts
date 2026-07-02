@@ -4,7 +4,9 @@ import fs, { unlink } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import {
+  type ActionScrollParam,
   type DeviceAction,
+  type ExecutorContext,
   type InterfaceType,
   type LocateResultElement,
   type Point,
@@ -14,22 +16,12 @@ import {
 } from '@midscene/core';
 import {
   type AbstractInterface,
-  type ActionTapParam,
   type AndroidDeviceInputOpt,
   type AndroidDeviceOpt,
+  type MobileInputPrimitives,
+  type PointerPoint,
+  createDefaultMobileActions,
   defineAction,
-  defineActionClearInput,
-  defineActionCursorMove,
-  defineActionDoubleClick,
-  defineActionDragAndDrop,
-  defineActionKeyboardPress,
-  defineActionLongPress,
-  defineActionPinch,
-  defineActionScroll,
-  defineActionSwipe,
-  defineActionTap,
-  normalizeMobileSwipeParam,
-  normalizePinchParam,
 } from '@midscene/core/device';
 import { getTmpFile, sleep } from '@midscene/core/utils';
 import {
@@ -42,12 +34,16 @@ import {
 import type { ElementInfo } from '@midscene/shared/extractor';
 import {
   createImgBase64ByFormat,
-  isValidImageBuffer,
+  validateScreenshotBuffer,
 } from '@midscene/shared/img';
 import { getDebug } from '@midscene/shared/logger';
 import { normalizeForComparison, repeat } from '@midscene/shared/utils';
 
 import { ADB } from 'appium-adb';
+import {
+  buildRunAdbShellPlanningFeedback,
+  runAdbShellStdoutOrThrow,
+} from './adb-shell';
 import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
@@ -106,165 +102,117 @@ export class AndroidDevice implements AbstractInterface {
   private cachedAdjustScale: { x: number; y: number } | null = null;
   private takeScreenshotFailCount = 0;
   private static readonly TAKE_SCREENSHOT_FAIL_THRESHOLD = 3;
+  private static readonly DEFAULT_MIN_SCREENSHOT_BUFFER_SIZE = 1024;
   interfaceType: InterfaceType = 'android';
   uri: string | undefined;
   options?: AndroidDeviceOpt;
 
-  actionSpace(): DeviceAction<any>[] {
-    const defaultActions = [
-      defineActionTap(async (param: ActionTapParam) => {
-        const element = param.locate;
-        assert(element, 'Element not found, cannot tap');
-        await this.mouseClick(element.center[0], element.center[1]);
-      }),
-      defineActionDoubleClick(async (param) => {
-        const element = param.locate;
-        assert(element, 'Element not found, cannot double click');
-        await this.mouseDoubleClick(element.center[0], element.center[1]);
-      }),
-      defineAction({
-        name: 'Input',
-        description: 'Input text into the input field',
-        interfaceAlias: 'aiInput',
-        paramSchema: z.object({
-          value: z
-            .string()
-            .describe(
-              'The text to input. Provide the final content for replace/append modes, or an empty string when using clear mode to remove existing text.',
-            ),
-          autoDismissKeyboard: z
-            .boolean()
-            .optional()
-            .describe(
-              'If true, the keyboard will be dismissed after the input is completed. Do not set it unless the user asks you to do so.',
-            ),
-          mode: z.preprocess(
-            (val) => (val === 'append' ? 'typeOnly' : val),
-            z
-              .enum(['replace', 'clear', 'typeOnly'])
-              .default('replace')
-              .optional()
-              .describe(
-                'Input mode: "replace" (default) - clear the field and input the value; "typeOnly" - type the value directly without clearing the field first; "clear" - clear the field without inputting new text.',
-              ),
-          ),
-          locate: getMidsceneLocationSchema()
-            .describe('The input field to be filled')
-            .optional(),
-        }),
-        sample: {
-          value: 'test@example.com',
-          locate: { prompt: 'the email input field' },
-        },
-        call: async (param: {
-          value: string;
-          autoDismissKeyboard?: boolean;
-          mode?: 'replace' | 'clear' | 'typeOnly';
-          locate?: LocateResultElement;
-        }) => {
-          const element = param.locate;
-          if (param.mode !== 'typeOnly') {
-            await this.clearInput(element as unknown as ElementInfo);
-          }
+  readonly inputPrimitives: MobileInputPrimitives = {
+    pointer: {
+      tap: (point) => this.tapPoint(point),
+      doubleClick: (point) => this.doubleTapPoint(point),
+      longPress: (point, opts) => this.longPressPoint(point, opts?.duration),
+      dragAndDrop: (from, to) => this.dragPoint(from, to),
+    },
+    keyboard: {
+      keyboardPress: (keyName) => this.pressKey(keyName),
+      typeText: async (value, opts) => {
+        const target = opts?.target as ElementInfo | undefined;
+        if (target && opts?.replace !== false) {
+          await this.clearInput(target);
+        } else if (target) {
+          await this.tapPoint({ x: target.center[0], y: target.center[1] });
+        }
 
-          if (param.mode === 'clear') {
-            // Clear mode removes existing text without entering new characters
-            return;
-          }
+        if (opts?.focusOnly) {
+          return;
+        }
 
-          if (!param || !param.value) {
-            return;
-          }
-
-          const autoDismissKeyboard =
-            param.autoDismissKeyboard ?? this.options?.autoDismissKeyboard;
-          await this.keyboardType(param.value, {
-            autoDismissKeyboard,
-          });
-        },
-      }),
-      defineActionScroll(async (param) => {
-        const element = param.locate;
-        const startingPoint = element
-          ? {
-              left: element.center[0],
-              top: element.center[1],
-            }
-          : undefined;
-        const scrollToEventName = param?.scrollType;
-        if (scrollToEventName === 'scrollToTop') {
-          await this.scrollUntilTop(startingPoint);
-        } else if (scrollToEventName === 'scrollToBottom') {
-          await this.scrollUntilBottom(startingPoint);
-        } else if (scrollToEventName === 'scrollToRight') {
-          await this.scrollUntilRight(startingPoint);
-        } else if (scrollToEventName === 'scrollToLeft') {
-          await this.scrollUntilLeft(startingPoint);
-        } else if (scrollToEventName === 'singleAction' || !scrollToEventName) {
-          if (param?.direction === 'down' || !param || !param.direction) {
-            await this.scrollDown(param?.distance || undefined, startingPoint);
-          } else if (param.direction === 'up') {
-            await this.scrollUp(param.distance || undefined, startingPoint);
-          } else if (param.direction === 'left') {
-            await this.scrollLeft(param.distance || undefined, startingPoint);
-          } else if (param.direction === 'right') {
-            await this.scrollRight(param.distance || undefined, startingPoint);
-          } else {
-            throw new Error(`Unknown scroll direction: ${param.direction}`);
-          }
-          // until mouse event is done
-          await sleep(500);
-        } else {
+        await this.typeText(value, opts);
+      },
+      clearInput: (target) =>
+        this.clearInput(target as ElementInfo | undefined),
+      cursorMove: async (direction, times = 1) => {
+        const arrowKey = direction === 'left' ? 'ArrowLeft' : 'ArrowRight';
+        for (let i = 0; i < times; i++) {
+          await this.pressKey(arrowKey);
+        }
+      },
+    },
+    touch: {
+      swipe: async (start, end, opts) => {
+        const duration = opts?.duration ?? 300;
+        const repeatCount = opts?.repeat ?? 1;
+        for (let i = 0; i < repeatCount; i++) {
+          await this.dragPoint(start, end, duration);
+        }
+      },
+      pinch: async (center, opts) => {
+        // yadb only injects gestures into the default display, so a non-default
+        // display would silently land the pinch on the main screen. Fail fast
+        // instead of misleading the caller.
+        if (
+          typeof this.options?.displayId === 'number' &&
+          this.options.displayId !== 0
+        ) {
           throw new Error(
-            `Unknown scroll event type: ${scrollToEventName}, param: ${JSON.stringify(
-              param,
-            )}`,
+            `Pinch is not supported on a non-default display (displayId=${this.options.displayId}). The underlying yadb tool only injects gestures into the default display.`,
           );
         }
-      }),
-      defineActionDragAndDrop(async (param) => {
-        const from = param.from;
-        const to = param.to;
-        assert(from, 'missing "from" param for drag and drop');
-        assert(to, 'missing "to" param for drag and drop');
-        await this.mouseDrag(
-          {
-            x: from.center[0],
-            y: from.center[1],
-          },
-          {
-            x: to.center[0],
-            y: to.center[1],
-          },
+        const { x: adjCenterX, y: adjCenterY } = await this.adjustCoordinates(
+          Math.round(center.x),
+          Math.round(center.y),
         );
-      }),
-      defineActionSwipe(async (param) => {
-        const { startPoint, endPoint, duration, repeatCount } =
-          normalizeMobileSwipeParam(param, await this.size());
-        for (let i = 0; i < repeatCount; i++) {
-          await this.mouseDrag(startPoint, endPoint, duration);
-        }
-      }),
-      defineActionKeyboardPress(async (param) => {
-        await this.keyboardPress(param.keyName);
-      }),
-      defineActionCursorMove(async (param) => {
-        const arrowKey =
-          param.direction === 'left' ? 'ArrowLeft' : 'ArrowRight';
-        const times = param.times ?? 1;
-        for (let i = 0; i < times; i++) {
-          await this.keyboardPress(arrowKey);
-          await sleep(100);
-        }
-      }),
-      defineActionLongPress(async (param) => {
-        const element = param.locate;
-        if (!element) {
-          throw new Error('LongPress requires an element to be located');
-        }
-        const [x, y] = element.center;
-        await this.longPress(x, y, param?.duration);
-      }),
+        const ratio =
+          adjCenterX !== 0 && center.x !== 0 ? adjCenterX / center.x : 1;
+        const adjStartDist = Math.round(opts.startDistance * ratio);
+        const adjEndDist = Math.round(opts.endDistance * ratio);
+        await this.ensureYadb();
+        const adb = await this.getAdb();
+        await adb.shell(
+          // Note: do not append getDisplayArg() here. `app_process` is the ART
+          // runtime launcher and does not accept the `-d <displayId>` flag the
+          // way `input`/`dumpsys` do; passing it makes the VM fail to start.
+          `app_process -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -pinch ${adjCenterX} ${adjCenterY} ${adjStartDist} ${adjEndDist} ${opts.duration}`,
+        );
+      },
+    },
+    scroll: {
+      scroll: (param) => this.performActionScroll(param),
+    },
+    system: {
+      backButton: () => this.back(),
+      homeButton: () => this.home(),
+      recentAppsButton: () => this.recentApps(),
+    },
+  };
+
+  actionSpace(): DeviceAction<any>[] {
+    const mobileActionContext = {
+      input: this.inputPrimitives,
+      size: () => this.size(),
+      sleep: async (timeMs: number) => {
+        await sleep(timeMs);
+      },
+      getDefaultAutoDismissKeyboard: () => this.options?.autoDismissKeyboard,
+      systemActions: {
+        backButton: {
+          name: 'AndroidBackButton',
+          description: 'Trigger the system "back" operation on Android devices',
+        },
+        homeButton: {
+          name: 'AndroidHomeButton',
+          description: 'Trigger the system "home" operation on Android devices',
+        },
+        recentAppsButton: {
+          name: 'AndroidRecentAppsButton',
+          description:
+            'Trigger the system "recent apps" operation on Android devices',
+        },
+      },
+    };
+    const defaultActions = [
+      ...createDefaultMobileActions(mobileActionContext),
       defineAction<
         z.ZodObject<{
           direction: z.ZodEnum<['up', 'down']>;
@@ -316,34 +264,51 @@ export class AndroidDevice implements AbstractInterface {
           }
         },
       }),
-      defineActionPinch(async (param) => {
-        const { centerX, centerY, startDistance, endDistance, duration } =
-          normalizePinchParam(param, await this.size());
-
-        const { x: adjCenterX, y: adjCenterY } = await this.adjustCoordinates(
-          centerX,
-          centerY,
-        );
-        const ratio =
-          adjCenterX !== 0 && centerX !== 0 ? adjCenterX / centerX : 1;
-        const adjStartDist = Math.round(startDistance * ratio);
-        const adjEndDist = Math.round(endDistance * ratio);
-
-        await this.ensureYadb();
-        const adb = await this.getAdb();
-        await adb.shell(
-          `app_process${this.getDisplayArg()} -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -pinch ${adjCenterX} ${adjCenterY} ${adjStartDist} ${adjEndDist} ${duration}`,
-        );
-      }),
-      defineActionClearInput(async (param) => {
-        await this.clearInput(param.locate as ElementInfo | undefined);
-      }),
     ];
 
     const platformSpecificActions = Object.values(createPlatformActions(this));
 
     const customActions = this.customActions || [];
     return [...defaultActions, ...platformSpecificActions, ...customActions];
+  }
+
+  private async performActionScroll(param: ActionScrollParam): Promise<void> {
+    const element = param.locate;
+    const startingPoint = element
+      ? {
+          left: element.center[0],
+          top: element.center[1],
+        }
+      : undefined;
+    const scrollToEventName = param?.scrollType;
+    if (scrollToEventName === 'scrollToTop') {
+      await this.scrollUntilTop(startingPoint);
+    } else if (scrollToEventName === 'scrollToBottom') {
+      await this.scrollUntilBottom(startingPoint);
+    } else if (scrollToEventName === 'scrollToRight') {
+      await this.scrollUntilRight(startingPoint);
+    } else if (scrollToEventName === 'scrollToLeft') {
+      await this.scrollUntilLeft(startingPoint);
+    } else if (scrollToEventName === 'singleAction' || !scrollToEventName) {
+      if (param?.direction === 'down' || !param || !param.direction) {
+        await this.scrollDown(param?.distance || undefined, startingPoint);
+      } else if (param.direction === 'up') {
+        await this.scrollUp(param.distance || undefined, startingPoint);
+      } else if (param.direction === 'left') {
+        await this.scrollLeft(param.distance || undefined, startingPoint);
+      } else if (param.direction === 'right') {
+        await this.scrollRight(param.distance || undefined, startingPoint);
+      } else {
+        throw new Error(`Unknown scroll direction: ${param.direction}`);
+      }
+      await sleep(500);
+    } else {
+      throw new Error(
+        `Unknown scroll event type: ${scrollToEventName}, param: ${JSON.stringify(
+          param,
+        )}`,
+      );
+    }
   }
 
   constructor(deviceId: string, options?: AndroidDeviceOpt) {
@@ -606,12 +571,14 @@ ${Object.keys(size)
   }
 
   async execYadb(keyboardContent: string): Promise<void> {
+    this.warnYadbOnNonDefaultDisplay('keyboard input');
     await this.ensureYadb();
 
     const adb = await this.getAdb();
 
     await adb.shell(
-      `app_process${this.getDisplayArg()} -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -keyboard '${keyboardContent}'`,
+      // `app_process` (ART launcher) does not accept the `-d <displayId>` flag.
+      `app_process -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -keyboard '${keyboardContent}'`,
     );
   }
 
@@ -1107,26 +1074,27 @@ ${Object.keys(size)
           AndroidDevice.TAKE_SCREENSHOT_FAIL_THRESHOLD
       ) {
         debugDevice('Taking screenshot via adb.takeScreenshot');
-        screenshotBuffer = await adb.takeScreenshot(null);
+        screenshotBuffer = await (
+          adb.takeScreenshot as unknown as () => Promise<Buffer>
+        ).call(adb);
         debugDevice('adb.takeScreenshot completed');
 
-        // make sure screenshotBuffer is not null
-        if (!screenshotBuffer) {
-          this.takeScreenshotFailCount++;
-          throw new Error(
-            'Failed to capture screenshot: screenshotBuffer is null',
-          );
-        }
-
-        // check if the buffer is a valid PNG image, it might be a error string
-        if (!isValidImageBuffer(screenshotBuffer)) {
+        try {
+          validateScreenshotBuffer(screenshotBuffer, {
+            label: 'Screenshot',
+            minBufferSize:
+              this.options?.minScreenshotBufferSize ??
+              AndroidDevice.DEFAULT_MIN_SCREENSHOT_BUFFER_SIZE,
+          });
+        } catch (validationError) {
           debugDevice(
-            'Invalid image buffer detected: not a valid image format',
+            'Invalid screenshot buffer detected: %s',
+            validationError instanceof Error
+              ? validationError.message
+              : String(validationError),
           );
           this.takeScreenshotFailCount++;
-          throw new Error(
-            'Screenshot buffer has invalid format: could not find valid image signature',
-          );
+          throw validationError;
         }
 
         // Reset fail count on success
@@ -1142,23 +1110,6 @@ ${Object.keys(size)
           );
         }
         throw new Error('Using shell screencap directly');
-      }
-
-      // Additional validation: check buffer size
-      // Real device screenshots are typically 100KB+, so 10KB is a safe threshold
-      // to catch corrupted/invalid buffers while allowing even very small test images
-      const validScreenshotBufferSize =
-        this.options?.minScreenshotBufferSize ?? 10 * 1024; // Default 10KB
-      if (
-        validScreenshotBufferSize > 0 &&
-        screenshotBuffer.length < validScreenshotBufferSize
-      ) {
-        debugDevice(
-          `Screenshot buffer too small: ${screenshotBuffer.length} bytes (minimum: ${validScreenshotBufferSize})`,
-        );
-        throw new Error(
-          `Screenshot buffer too small: ${screenshotBuffer.length} bytes (minimum: ${validScreenshotBufferSize})`,
-        );
       }
     } catch (error) {
       debugDevice(
@@ -1190,22 +1141,12 @@ ${Object.keys(size)
         debugDevice(`adb.pull completed, local path: ${screenshotPath}`);
         screenshotBuffer = await fs.promises.readFile(screenshotPath);
 
-        // Validate the fallback screenshot buffer as well
-        const validScreenshotBufferSize =
-          this.options?.minScreenshotBufferSize ?? 10 * 1024; // Default 10KB
-        if (
-          !screenshotBuffer ||
-          (validScreenshotBufferSize > 0 &&
-            screenshotBuffer.length < validScreenshotBufferSize)
-        ) {
-          throw new Error(
-            `Fallback screenshot validation failed: buffer size ${screenshotBuffer?.length || 0} bytes (minimum: ${validScreenshotBufferSize})`,
-          );
-        }
-
-        if (!isValidImageBuffer(screenshotBuffer)) {
-          throw new Error('Fallback screenshot buffer has invalid PNG format');
-        }
+        validateScreenshotBuffer(screenshotBuffer, {
+          label: 'Fallback screenshot',
+          minBufferSize:
+            this.options?.minScreenshotBufferSize ??
+            AndroidDevice.DEFAULT_MIN_SCREENSHOT_BUFFER_SIZE,
+        });
 
         debugDevice(
           `Fallback screenshot validated successfully: ${screenshotBuffer.length} bytes`,
@@ -1254,7 +1195,7 @@ ${Object.keys(size)
 
   async clearInput(element?: ElementInfo): Promise<void> {
     if (element) {
-      await this.mouseClick(element.center[0], element.center[1]);
+      await this.tapPoint({ x: element.center[0], y: element.center[1] });
     }
 
     await this.ensureYadb();
@@ -1271,8 +1212,10 @@ ${Object.keys(size)
       await adb.clearTextField(100);
     } else {
       // Use the yadb tool to clear the input box
+      this.warnYadbOnNonDefaultDisplay('keyboard clear');
       await adb.shell(
-        `app_process${this.getDisplayArg()} -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -keyboardClear`,
+        // `app_process` (ART launcher) does not accept the `-d <displayId>` flag.
+        'app_process -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -keyboardClear',
       );
     }
 
@@ -1281,7 +1224,7 @@ ${Object.keys(size)
     }
 
     if (element) {
-      await this.mouseClick(element.center[0], element.center[1]);
+      await this.tapPoint({ x: element.center[0], y: element.center[1] });
     }
   }
 
@@ -1310,7 +1253,7 @@ ${Object.keys(size)
       const end = { x: start.x, y: Math.round(height) };
 
       await repeat(defaultScrollUntilTimes, () =>
-        this.mouseDrag(start, end, defaultFastScrollDuration),
+        this.dragPoint(start, end, defaultFastScrollDuration),
       );
       await sleep(1000);
       return;
@@ -1331,7 +1274,7 @@ ${Object.keys(size)
       const end = { x: start.x, y: 0 };
 
       await repeat(defaultScrollUntilTimes, () =>
-        this.mouseDrag(start, end, defaultFastScrollDuration),
+        this.dragPoint(start, end, defaultFastScrollDuration),
       );
       await sleep(1000);
       return;
@@ -1353,7 +1296,7 @@ ${Object.keys(size)
       const end = { x: Math.round(width), y: start.y };
 
       await repeat(defaultScrollUntilTimes, () =>
-        this.mouseDrag(start, end, defaultFastScrollDuration),
+        this.dragPoint(start, end, defaultFastScrollDuration),
       );
       await sleep(1000);
       return;
@@ -1374,7 +1317,7 @@ ${Object.keys(size)
       const end = { x: 0, y: start.y };
 
       await repeat(defaultScrollUntilTimes, () =>
-        this.mouseDrag(start, end, defaultFastScrollDuration),
+        this.dragPoint(start, end, defaultFastScrollDuration),
       );
       await sleep(1000);
       return;
@@ -1410,7 +1353,7 @@ ${Object.keys(size)
           Math.abs(end.y - start.y),
         );
       }
-      await this.mouseDrag(start, end);
+      await this.dragPoint(start, end);
       return;
     }
 
@@ -1441,7 +1384,7 @@ ${Object.keys(size)
           Math.abs(end.y - start.y),
         );
       }
-      await this.mouseDrag(start, end);
+      await this.dragPoint(start, end);
       return;
     }
 
@@ -1478,7 +1421,7 @@ ${Object.keys(size)
           Math.abs(end.x - start.x),
         );
       }
-      await this.mouseDrag(start, end);
+      await this.dragPoint(start, end);
       return;
     }
 
@@ -1515,7 +1458,7 @@ ${Object.keys(size)
           Math.abs(end.x - start.x),
         );
       }
-      await this.mouseDrag(start, end);
+      await this.dragPoint(start, end);
       return;
     }
 
@@ -1579,7 +1522,7 @@ ${Object.keys(size)
     );
   }
 
-  async keyboardType(
+  private async typeText(
     text: string,
     options?: AndroidDeviceInputOpt,
   ): Promise<void> {
@@ -1647,7 +1590,7 @@ ${Object.keys(size)
     return keyMap[lowerKey] || key; // Return original key if no mapping found
   }
 
-  async keyboardPress(key: string): Promise<void> {
+  private async pressKey(key: string): Promise<void> {
     // Map web keys to Android key codes (numbers)
     const keyCodeMap: Record<string, number> = {
       Enter: 66,
@@ -1681,19 +1624,25 @@ ${Object.keys(size)
     }
   }
 
-  async mouseClick(x: number, y: number): Promise<void> {
+  private async tapPoint(point: PointerPoint): Promise<void> {
     const adb = await this.getAdb();
 
     // Use adjusted coordinates
-    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(x, y);
+    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(
+      point.x,
+      point.y,
+    );
     await adb.shell(
       `input${this.getDisplayArg()} swipe ${adjustedX} ${adjustedY} ${adjustedX} ${adjustedY} 150`,
     );
   }
 
-  async mouseDoubleClick(x: number, y: number): Promise<void> {
+  private async doubleTapPoint(point: PointerPoint): Promise<void> {
     const adb = await this.getAdb();
-    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(x, y);
+    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(
+      point.x,
+      point.y,
+    );
 
     // Use input tap for double-click as it generates proper touch events
     // that Android can recognize as a double-click gesture
@@ -1710,22 +1659,25 @@ ${Object.keys(size)
     return Promise.resolve();
   }
 
-  async mouseDrag(
-    from: { x: number; y: number },
-    to: { x: number; y: number },
+  private async dragPoint(
+    from: PointerPoint,
+    to: PointerPoint,
     duration?: number,
   ): Promise<void> {
-    const adb = await this.getAdb();
+    await this.swipePoint(from, to, duration ?? defaultNormalScrollDuration);
+  }
 
-    // Use adjusted coordinates
+  private async swipePoint(
+    from: PointerPoint,
+    to: PointerPoint,
+    duration: number,
+  ): Promise<void> {
+    const adb = await this.getAdb();
     const { x: fromX, y: fromY } = await this.adjustCoordinates(from.x, from.y);
     const { x: toX, y: toY } = await this.adjustCoordinates(to.x, to.y);
 
-    // Ensure duration has a default value
-    const swipeDuration = duration ?? defaultNormalScrollDuration;
-
     await adb.shell(
-      `input${this.getDisplayArg()} swipe ${fromX} ${fromY} ${toX} ${toY} ${swipeDuration}`,
+      `input${this.getDisplayArg()} swipe ${fromX} ${fromY} ${toX} ${toY} ${duration}`,
     );
   }
 
@@ -1795,20 +1747,12 @@ ${Object.keys(size)
     const endX = Math.round(startX - deltaX);
     const endY = Math.round(startY - deltaY);
 
-    // Adjust coordinates to fit device ratio
-    const { x: adjustedStartX, y: adjustedStartY } =
-      await this.adjustCoordinates(startX, startY);
-    const { x: adjustedEndX, y: adjustedEndY } = await this.adjustCoordinates(
-      endX,
-      endY,
-    );
-
-    const adb = await this.getAdb();
     const swipeDuration = duration ?? defaultNormalScrollDuration;
 
-    // Execute the swipe operation
-    await adb.shell(
-      `input${this.getDisplayArg()} swipe ${adjustedStartX} ${adjustedStartY} ${adjustedEndX} ${adjustedEndY} ${swipeDuration}`,
+    await this.swipePoint(
+      { x: startX, y: startY },
+      { x: endX, y: endY },
+      swipeDuration,
     );
   }
 
@@ -1844,27 +1788,38 @@ ${Object.keys(size)
   }
 
   /**
-   * Get the current time from the Android device.
-   * Returns the device's current timestamp in milliseconds.
-   * This is useful when the system time and device time are not synchronized.
+   * Get the current device-local time as a formatted string.
+   * This avoids formatting an Android epoch timestamp in the host machine's
+   * timezone, which can disagree with the device status bar.
    */
-  async getTimestamp(): Promise<number> {
+  async getDeviceLocalTimeString(
+    format = 'YYYY-MM-DD HH:mm:ss',
+  ): Promise<string> {
     const adb = await this.getAdb();
     try {
-      // Get time in milliseconds using date command
-      // %s gives seconds since epoch, %3N gives milliseconds
-      const stdout = await adb.shell('date +%s%3N');
-      const timestamp = Number.parseInt(stdout.trim(), 10);
+      const stdout = await adb.shell('date +%Y-%m-%dT%H:%M:%S');
+      const match = stdout
+        .trim()
+        .match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
 
-      if (Number.isNaN(timestamp)) {
-        throw new Error(`Invalid timestamp format: ${stdout}`);
+      if (!match) {
+        throw new Error(`Invalid device time format: ${stdout}`);
       }
 
-      debugDevice(`Got device time: ${timestamp}`);
-      return timestamp;
+      const [, year, month, day, hours, minutes, seconds] = match;
+      const timeString = format
+        .replace('YYYY', year)
+        .replace('MM', month)
+        .replace('DD', day)
+        .replace('HH', hours)
+        .replace('mm', minutes)
+        .replace('ss', seconds);
+
+      debugDevice(`Got device local time: ${timeString}`);
+      return `${timeString} (${format})`;
     } catch (error) {
-      debugDevice(`Failed to get device time: ${error}`);
-      throw new Error(`Failed to get device time: ${error}`);
+      debugDevice(`Failed to get device local time: ${error}`);
+      throw new Error(`Failed to get device local time: ${error}`);
     }
   }
 
@@ -1883,11 +1838,17 @@ ${Object.keys(size)
     await adb.shell(`input${this.getDisplayArg()} keyevent 187`);
   }
 
-  async longPress(x: number, y: number, duration = 2000): Promise<void> {
+  private async longPressPoint(
+    point: PointerPoint,
+    duration = 2000,
+  ): Promise<void> {
     const adb = await this.getAdb();
 
     // Use adjusted coordinates
-    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(x, y);
+    const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(
+      point.x,
+      point.y,
+    );
     await adb.shell(
       `input${this.getDisplayArg()} swipe ${adjustedX} ${adjustedY} ${adjustedX} ${adjustedY} ${duration}`,
     );
@@ -1919,16 +1880,7 @@ ${Object.keys(size)
     to: { x: number; y: number },
     duration: number,
   ): Promise<void> {
-    const adb = await this.getAdb();
-
-    // Use adjusted coordinates
-    const { x: fromX, y: fromY } = await this.adjustCoordinates(from.x, from.y);
-    const { x: toX, y: toY } = await this.adjustCoordinates(to.x, to.y);
-
-    // Use the specified duration for better pull gesture recognition
-    await adb.shell(
-      `input${this.getDisplayArg()} swipe ${fromX} ${fromY} ${toX} ${toY} ${duration}`,
-    );
+    await this.swipePoint(from, to, duration);
   }
 
   async pullUp(
@@ -1956,6 +1908,24 @@ ${Object.keys(size)
     return typeof this.options?.displayId === 'number'
       ? ` -d ${this.options.displayId}`
       : '';
+  }
+
+  /**
+   * yadb (launched via `app_process`) cannot target a specific display and
+   * always acts on the default display. When a non-default display is
+   * configured, warn so the caller knows the operation lands on the main
+   * screen instead of failing silently. Unlike pinch, keyboard operations also
+   * have an `input`-based path, so we warn rather than throw.
+   */
+  private warnYadbOnNonDefaultDisplay(operation: string): void {
+    if (
+      typeof this.options?.displayId === 'number' &&
+      this.options.displayId !== 0
+    ) {
+      warnDevice(
+        `yadb ${operation} cannot target display ${this.options.displayId}; it will act on the default display.`,
+      );
+    }
   }
 
   async getPhysicalDisplayId(): Promise<string | null> {
@@ -2102,9 +2072,6 @@ const createPlatformActions = (
   RunAdbShell: DeviceActionRunAdbShell;
   Launch: DeviceActionLaunch;
   Terminate: DeviceActionTerminate;
-  AndroidBackButton: DeviceActionAndroidBackButton;
-  AndroidHomeButton: DeviceActionAndroidHomeButton;
-  AndroidRecentAppsButton: DeviceActionAndroidRecentAppsButton;
 } => {
   return {
     RunAdbShell: defineAction<
@@ -2113,18 +2080,27 @@ const createPlatformActions = (
       string
     >({
       name: 'RunAdbShell',
-      description: 'Execute ADB shell command on Android device',
+      description:
+        'Execute an ADB shell command on the Android device and return the command stdout. Read the returned stdout to decide the next step; the stdout may indicate either success or failure.',
       interfaceAlias: 'runAdbShell',
       paramSchema: runAdbShellParamSchema,
       sample: {
         command: 'dumpsys window displays | grep -E "mCurrentFocus"',
       },
-      call: async (param) => {
+      call: async (param: RunAdbShellParam, context?: ExecutorContext) => {
         if (!param.command || param.command.trim() === '') {
           throw new Error('RunAdbShell requires a non-empty command parameter');
         }
         const adb = await device.getAdb();
-        return await adb.shell(param.command);
+        const stdout = await runAdbShellStdoutOrThrow(adb, param.command);
+        const planningFeedback = buildRunAdbShellPlanningFeedback({
+          command: param.command,
+          stdout,
+        });
+        if (planningFeedback && context?.task) {
+          context.task.planningFeedback = planningFeedback;
+        }
+        return stdout;
       },
     }),
     Launch: defineAction<typeof launchParamSchema, LaunchParam, void>({
@@ -2152,28 +2128,6 @@ const createPlatformActions = (
           throw new Error('Terminate requires a non-empty uri parameter');
         }
         await device.terminate(param.uri);
-      },
-    }),
-    AndroidBackButton: defineAction({
-      name: 'AndroidBackButton',
-      description: 'Trigger the system "back" operation on Android devices',
-      call: async () => {
-        await device.back();
-      },
-    }),
-    AndroidHomeButton: defineAction({
-      name: 'AndroidHomeButton',
-      description: 'Trigger the system "home" operation on Android devices',
-      call: async () => {
-        await device.home();
-      },
-    }),
-    AndroidRecentAppsButton: defineAction({
-      name: 'AndroidRecentAppsButton',
-      description:
-        'Trigger the system "recent apps" operation on Android devices',
-      call: async () => {
-        await device.recentApps();
       },
     }),
   } as const;

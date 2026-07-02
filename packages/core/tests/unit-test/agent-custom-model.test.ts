@@ -76,8 +76,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "default",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -91,7 +92,7 @@ describe('Agent with custom OpenAI client', () => {
           "createOpenAIClient": undefined,
           "extraBody": undefined,
           "httpProxy": undefined,
-          "intent": "default",
+          "intent": "planning",
           "modelDescription": "qwen2.5-vl mode",
           "modelFamily": "qwen2.5-vl",
           "modelName": "qwen2.5-vl-max",
@@ -103,8 +104,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "default",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -118,7 +120,7 @@ describe('Agent with custom OpenAI client', () => {
           "createOpenAIClient": undefined,
           "extraBody": undefined,
           "httpProxy": undefined,
-          "intent": "default",
+          "intent": "insight",
           "modelDescription": "qwen2.5-vl mode",
           "modelFamily": "qwen2.5-vl",
           "modelName": "qwen2.5-vl-max",
@@ -130,8 +132,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "default",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -169,8 +172,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "default",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -196,8 +200,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "planning",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -223,8 +228,9 @@ describe('Agent with custom OpenAI client', () => {
           "reasoningEnabled": undefined,
           "retryCount": 1,
           "retryInterval": 2000,
+          "slot": "insight",
           "socksProxy": undefined,
-          "temperature": 0,
+          "temperature": undefined,
           "timeout": undefined,
           "uiTarsModelVersion": undefined,
         }
@@ -313,12 +319,14 @@ describe('Agent with custom OpenAI client', () => {
       );
       expect(planningConfig.createOpenAIClient).toBe(mockCreateClient);
       expect(planningConfig.intent).toBe('planning');
+      expect(planningConfig.slot).toBe('planning');
 
       const defaultConfig = (agent as any).modelConfigManager.getModelConfig(
         'default',
       );
       expect(defaultConfig.createOpenAIClient).toBe(mockCreateClient);
       expect(defaultConfig.intent).toBe('default');
+      expect(defaultConfig.slot).toBe('default');
     });
   });
 
@@ -461,6 +469,120 @@ describe('Agent with custom OpenAI client', () => {
       expect(config1.createOpenAIClient).toBe(mockCreateClient);
       expect(config2.createOpenAIClient).toBe(mockCreateClient);
       expect(config3.createOpenAIClient).toBe(mockCreateClient);
+    });
+  });
+
+  describe('planning locate strategy', () => {
+    it('should not include bbox in planning when planning config is explicitly resolved', async () => {
+      const mockInterface = createMockInterface();
+      const agent = new Agent(mockInterface, {
+        modelConfig: {
+          ...defaultModelConfig,
+          [MIDSCENE_PLANNING_MODEL_NAME]:
+            defaultModelConfig[MIDSCENE_MODEL_NAME],
+          [MIDSCENE_PLANNING_MODEL_API_KEY]:
+            defaultModelConfig[MIDSCENE_MODEL_API_KEY],
+          [MIDSCENE_PLANNING_MODEL_BASE_URL]:
+            defaultModelConfig[MIDSCENE_MODEL_BASE_URL],
+        },
+      });
+      const actionSpy = vi
+        .spyOn((agent as any).taskExecutor, 'action')
+        .mockResolvedValue({
+          output: {
+            yamlFlow: [],
+          },
+        });
+
+      await agent.aiAct('click the submit button');
+
+      expect(actionSpy).toHaveBeenCalled();
+      expect(actionSpy.mock.calls[0][3]).toBe(false);
+      expect(
+        (agent as any).modelConfigManager.getModelConfig('planning').slot,
+      ).toBe('planning');
+    });
+
+    it('should include bbox in planning when planning config falls back to default', async () => {
+      const mockInterface = createMockInterface();
+      const agent = new Agent(mockInterface, {
+        modelConfig: defaultModelConfig,
+      });
+      const actionSpy = vi
+        .spyOn((agent as any).taskExecutor, 'action')
+        .mockResolvedValue({
+          output: {
+            yamlFlow: [],
+          },
+        });
+
+      await agent.aiAct('click the submit button');
+
+      expect(actionSpy).toHaveBeenCalled();
+      expect(actionSpy.mock.calls[0][3]).toBe(true);
+      expect(
+        (agent as any).modelConfigManager.getModelConfig('planning').slot,
+      ).toBe('default');
+    });
+
+    it('should disable deepThink before resolving custom planning strategy', async () => {
+      const mockInterface = createMockInterface();
+      const agent = new Agent(mockInterface, {
+        modelConfig: {
+          ...defaultModelConfig,
+          [MIDSCENE_MODEL_FAMILY]: 'auto-glm',
+        },
+      });
+      const actionSpy = vi
+        .spyOn((agent as any).taskExecutor, 'action')
+        .mockResolvedValue({
+          output: {
+            yamlFlow: [],
+          },
+        });
+      const warnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+
+      await agent.aiAct('click the submit button', { deepThink: true });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[Midscene]',
+        'The "deepThink" option is not supported for aiAct with custom planning adapters (modelFamily: auto-glm). It will be ignored.',
+      );
+      expect(actionSpy).toHaveBeenCalled();
+      expect(actionSpy.mock.calls[0][3]).toBe(true);
+      expect(actionSpy.mock.calls[0][7]).toBe(1);
+      expect(actionSpy.mock.calls[0][8]).toBe(false);
+    });
+
+    it('should disable deepLocate before running custom planning', async () => {
+      const mockInterface = createMockInterface();
+      const agent = new Agent(mockInterface, {
+        modelConfig: {
+          ...defaultModelConfig,
+          [MIDSCENE_MODEL_FAMILY]: 'auto-glm',
+        },
+      });
+      const actionSpy = vi
+        .spyOn((agent as any).taskExecutor, 'action')
+        .mockResolvedValue({
+          output: {
+            yamlFlow: [],
+          },
+        });
+      const warnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+
+      await agent.aiAct('click the submit button', { deepLocate: true });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[Midscene]',
+        'The "deepLocate" option is not supported for aiAct with the current planning adapter (modelFamily: auto-glm). It will be ignored.',
+      );
+      expect(actionSpy).toHaveBeenCalled();
+      expect(actionSpy.mock.calls[0][10]).toBe(false);
     });
   });
 });

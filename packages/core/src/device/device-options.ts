@@ -37,7 +37,12 @@ export type AndroidDeviceOpt = {
   screenshotResizeScale?: number;
   /** Always fetch screen info on each call; if false, cache the first result */
   alwaysRefreshScreenInfo?: boolean;
-  /** Minimum screenshot buffer size in bytes (default: 10240 = 10KB). Set to 0 to disable validation. */
+  /**
+   * Screenshot buffer size validation threshold in bytes. Buffers below this
+   * value are treated as failed or corrupted captures. Defaults to 1024 (1KB).
+   * Set to 0 to skip only this size check; empty-buffer and image-format
+   * validation still run.
+   */
   minScreenshotBufferSize?: number;
   /**
    * Scrcpy screenshot configuration for high-performance screen capture.
@@ -115,12 +120,23 @@ export type IOSDeviceInputOpt = {
 export type IOSDeviceOpt = {
   /** Device ID (UDID) to connect to */
   deviceId?: string;
+  /**
+   * Optional npm module path used to override the default iOS device implementation.
+   * The target module must export an `IOSDevice` class (or default export) compatible with Midscene's iOS device interface.
+   */
+  iOSDeviceClassOverride?: string;
   /** Custom device actions to register */
   customActions?: DeviceAction<any>[];
   /** WebDriverAgent port (default: 8100) */
   wdaPort?: number;
   /** WebDriverAgent host (default: 'localhost') */
   wdaHost?: string;
+  /**
+   * Existing WebDriverAgent session ID to reuse.
+   * When provided, Midscene skips creating a new WDA session and does not delete
+   * the external session during cleanup.
+   */
+  sessionId?: string;
   /** Whether to use WebDriverAgent */
   useWDA?: boolean;
   /** WDA MJPEG server port for real-time screen streaming (default: 9100) */
@@ -133,6 +149,8 @@ export type IOSDeviceOpt = {
 export type HarmonyDeviceInputOpt = {
   /** Automatically dismiss the keyboard after input is completed */
   autoDismissKeyboard?: boolean;
+  /** Strategy for dismissing the keyboard. Defaults to 'esc-first'. */
+  keyboardDismissStrategy?: 'esc-first' | 'back-first';
 };
 
 /**

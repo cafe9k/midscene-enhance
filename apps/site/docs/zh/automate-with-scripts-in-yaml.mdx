@@ -41,7 +41,7 @@ tasks:
 
 脚本文件使用 YAML 格式来描述自动化任务。它定义了要操作的目标（如网页或安卓应用）以及一系列要执行的步骤。
 
-一个标准的 `.yaml` 脚本文件包含 `web`、`android`、`ios` 或 `computer` 部分配置环境，可选的 `agent` 部分配置 AI Agent 行为，以及一个 `tasks` 部分来定义自动化任务。
+一个标准的 `.yaml` 脚本文件包含 `web`、`android`、`ios`、`harmony` 或 `computer` 部分配置环境,可选的 `agent` 部分配置 AI Agent 行为,以及一个 `tasks` 部分来定义自动化任务。
 
 ```yaml
 web:
@@ -153,10 +153,10 @@ web:
   # 浏览器 UA，可选
   userAgent: <ua>
 
-  # 浏览器视口宽度，可选，默认 1280
+  # 浏览器视口宽度，可选，默认 1440
   viewportWidth: <width>
 
-  # 浏览器视口高度，可选，默认 960
+  # 浏览器视口高度，可选，默认 800
   viewportHeight: <height>
 
   # 浏览器设备像素比，可选，默认跟随系统
@@ -164,6 +164,18 @@ web:
 
   # JSON 格式的浏览器 Cookie 文件路径，可选
   cookie: <path-to-cookie-file>
+
+  # Chrome 下载目录（仅 Puppeteer 模式），可选
+  # 相对路径会基于当前工作目录解析
+  # bridgeMode 不支持该选项
+  downloadPath: <path-to-download-directory>
+
+  # 随每个请求发送的额外 HTTP 请求头（仅 Puppeteer 模式），可选
+  # 适用于服务器会校验自定义请求头的场景
+  # 值必须是字符串；像 true、false、纯数字这类会被 YAML 解析为非字符串的值需加引号，如 "true"
+  extraHTTPHeaders:
+    X-Custom-Token: my-token
+    Accept-Language: en-US
 
   # Puppeteer 模式下等待网络空闲的策略，可选
   # `timeout` 会作用于初始打开 YAML 中的 `web.url`，以及后续 `aiTap`、`aiInput` 等操作后的等待
@@ -224,13 +236,13 @@ android:
   # 其他 AndroidDevice 构造函数支持的所有选项
   # 例如：androidAdbPath, remoteAdbHost, remoteAdbPort,
   # imeStrategy, displayId, autoDismissKeyboard, keyboardDismissStrategy,
-  # alwaysRefreshScreenInfo 等
+  # minScreenshotBufferSize, alwaysRefreshScreenInfo 等
   # 完整配置项请参考 AndroidDevice 的构造函数文档
 ```
 
 :::tip 查看完整的 Android 配置项
 
-YAML 脚本现在支持 `AndroidDevice` 构造函数的所有配置选项。完整的配置项列表请参考 [Android 集成文档中的 AndroidDevice 构造函数](./integrate-with-android#androiddevice-的构造函数)。
+YAML 脚本现在支持 `AndroidDevice` 构造函数的所有配置选项。完整的配置项列表请参考 [Android API 参考中的 AndroidDevice](./android-api-reference#androiddevice)。
 
 :::
 
@@ -240,7 +252,7 @@ Android 平台提供了一些特定的动作，可以在 YAML 脚本的 `flow` �
 
 **`runAdbShell` - 执行 ADB Shell 命令**
 
-在 Android 设备上执行 ADB shell 命令。
+在 Android 设备上执行 ADB shell 命令。传入的内容只需要包含 shell 命令本身，不要包含 `adb shell` 前缀。如需设置命令超时，请将 `timeout` 作为 `runAdbShell` 的同级字段。
 
 ```yaml
 android:
@@ -254,6 +266,15 @@ tasks:
   - name: 获取电池信息
     flow:
       - runAdbShell: 'dumpsys battery'
+
+  - name: 点击屏幕坐标
+    flow:
+      - runAdbShell: 'input tap 100 200'
+
+  - name: 执行带超时的命令
+    flow:
+      - runAdbShell: 'dumpsys activity services'
+        timeout: 60000
 ```
 
 常用 ADB Shell 命令：
@@ -261,6 +282,7 @@ tasks:
 - `dumpsys battery` - 获取电池信息
 - `dumpsys window` - 获取窗口信息
 - `settings get secure android_id` - 获取设备 ID
+- `input tap <x> <y>` - 点击屏幕坐标
 - `input keyevent <keycode>` - 发送按键事件
 
 **`launch` - 启动应用或 URL**
@@ -323,7 +345,7 @@ ios:
 
 :::tip 查看完整的 iOS 配置项
 
-YAML 脚本现在支持 `IOSDevice` 构造函数的所有配置选项。完整的配置项列表请参考 [iOS 集成文档中的 IOSDevice 构造函数](./integrate-with-ios#iosdevice-的构造函数)。
+YAML 脚本现在支持 `IOSDevice` 构造函数的所有配置选项。完整的配置项列表请参考 [iOS API 参考中的 IOSDevice](./ios-api-reference#iosdevice)。
 
 :::
 
@@ -400,6 +422,79 @@ tasks:
       - terminate: com.apple.Preferences
 ```
 
+### `harmony` 部分
+
+`harmony` 部分用于通过 HDC 进行 HarmonyOS 设备自动化。设备通过 `hdc` 连接,运行前请先确认 `hdc list targets` 能列出你的设备。
+
+```yaml
+harmony:
+  # 要连接的 HarmonyOS 设备 ID,可选,默认使用第一个已连接的设备。
+  deviceId: <device-id>
+
+  # 要启动的应用,可选,默认使用设备当前屏幕。
+  launch: <bundle-name>
+
+  # HDC 可执行文件路径,可选。
+  hdcPath: <path-to-hdc>
+
+  # 输入完成后是否自动收起键盘,可选,默认为 false。
+  autoDismissKeyboard: <boolean>
+
+  # 应用名到 Bundle 名的自定义映射,可选。用户提供的映射优先级高于默认映射。
+  appNameMapping:
+    <app-name>: <bundle-name>
+
+  # 用于输出 aiQuery/aiAssert 结果的 JSON 文件路径,可选。
+  output: <path-to-output-file>
+
+  # HarmonyDevice 构造函数支持的其他所有选项
+```
+
+#### HarmonyOS 平台专属动作
+
+**`launch` - 启动应用**
+
+通过 Bundle 名启动 HarmonyOS 应用。
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: 启动应用
+    flow:
+      - launch: com.example.app
+```
+
+**`terminate` - 终止应用**
+
+通过 Bundle 名或映射的应用名终止(强制停止)正在运行的 HarmonyOS 应用。
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: 终止应用
+    flow:
+      - terminate: com.example.app
+```
+
+**`runHdcShell` - 执行 HDC Shell 命令**
+
+在 HarmonyOS 设备上执行 HDC shell 命令。
+
+```yaml
+harmony:
+  deviceId: 'test-device'
+
+tasks:
+  - name: 导出窗口信息
+    flow:
+      - runHdcShell:
+          command: 'hidumper -s WindowManagerService -a'
+```
+
 ### `computer` 部分
 
 `computer` 部分用于 PC 桌面自动化。它允许你控制桌面环境，包括鼠标移动、键盘输入和屏幕查询。
@@ -459,27 +554,29 @@ tasks:
       # 执行一个交互，`ai` 是 `aiAct` 的简写方式
       - ai: <prompt>
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时,是否允许缓存当前 API 调用结果。默认值为 True
-        deepThink: <boolean> # 可选，当模型支持时（取决于 MIDSCENE_MODEL_FAMILY），开启规划阶段的深度思考能力。默认值为 undefined，跟随模型服务商的默认策略。
+        deepThink: <boolean> # 可选，引导 aiAct 注重任务拆解，并将任务 Planning 和 UI 元素定位拆解为不同的模型调用。默认值为 false。
+        deepLocate: <boolean> # 可选，在 aiAct 执行过程中为 UI 元素定位开启深度定位。默认值为 false。
 
       # 这种用法与 `ai` 相同
       # 注意：在之前版本中也被写作 `aiAction`，当前版本兼容两种写法
       - aiAct: <prompt>
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
-        deepThink: <boolean> # 可选，当模型支持时（取决于 MIDSCENE_MODEL_FAMILY），开启规划阶段的深度思考能力。默认值为 undefined，跟随模型服务商的默认策略。
+        deepThink: <boolean> # 可选，引导 aiAct 注重任务拆解，并将任务 Planning 和 UI 元素定位拆解为不同的模型调用。默认值为 false。
+        deepLocate: <boolean> # 可选，在 aiAct 执行过程中为 UI 元素定位开启深度定位。默认值为 false。
 
       # 即时操作(Instant Action, .aiTap, .aiHover, .aiInput, .aiKeyboardPress, .aiScroll)
       # ----------------
 
       # 点击一个元素，用 prompt 描述元素位置
       - aiTap: <prompt>
-        deepThink: <boolean> # 可选，是否使用深度思考（deepThink）来精确定位元素。默认值为 False
+        deepLocate: <boolean> # 可选，是否为该元素开启深度定位。默认值为 False
         xpath: <xpath> # 可选，目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
         fileChooserAccept: <path> | [<path1>, <path2>] # 可选，当点击触发文件选择器时，指定要上传的文件路径；仅在 web 中可用
 
       # 鼠标悬停一个元素，用 prompt 描述元素位置
       - aiHover: <prompt>
-        deepThink: <boolean> # 可选，是否使用深度思考（deepThink）来精确定位元素。默认值为 False
+        deepLocate: <boolean> # 可选，是否为该元素开启深度定位。默认值为 False
         xpath: <xpath> # 可选，目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
 
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
@@ -487,14 +584,14 @@ tasks:
       # 输入文本到一个元素，用 prompt 描述元素位置
       - aiInput: <prompt> # 要输入文本的元素
         value: <输入框的最终文本内容>
-        deepThink: <boolean> # 可选，是否使用深度思考（deepThink）来精确定位元素。默认值为 False
+        deepLocate: <boolean> # 可选，是否为该元素开启深度定位。默认值为 False
         xpath: <xpath> # 可选，目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
 
       # 在元素上按下某个按键（如 Enter，Tab，Escape 等），用 prompt 描述元素位置
       - aiKeyboardPress: <prompt> # 要按键的目标元素
         keyName: <按键>
-        deepThink: <boolean> # 可选，是否使用深度思考（deepThink）来精确定位元素。默认值为 False
+        deepLocate: <boolean> # 可选，是否为该元素开启深度定位。默认值为 False
         xpath: <xpath> # 可选，目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
 
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
@@ -504,7 +601,7 @@ tasks:
         scrollType: 'singleAction' # 或 'scrollToBottom' | 'scrollToTop' | 'scrollToRight' | 'scrollToLeft'，默认值为 'singleAction'
         direction: 'down' # 或 'up' | 'left' | 'right'，默认值为 'down'。仅在 scrollType 为 singleAction 时生效
         distance: <number> # 可选，滚动距离，单位为像素。设置为 null 表示由 Midscene 自动决定。
-        deepThink: <boolean> # 可选，是否使用深度思考（deepThink）来精确定位元素。默认值为 False
+        deepLocate: <boolean> # 可选，是否为该元素开启深度定位。默认值为 False
         xpath: <xpath> # 可选，目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
 
         cacheable: <boolean> # 可选，当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 True
@@ -532,6 +629,13 @@ tasks:
         errorMessage: <error-message> # 可选，当断言失败时打印的错误信息。
         name: <name> # 可选，给断言一个名称，会在 JSON 输出中作为 key 使用
 
+      # 运行一个 Gherkin Scenario。此功能从 Midscene 1.10 开始支持，目前仍处于 Beta 阶段。
+      - runGherkinScenario: |
+          Scenario: 添加待办事项
+            Given 待办事项页面已经打开
+            When 我添加一条名为“买牛奶”的待办事项
+            Then 待办事项列表中应该包含“买牛奶”
+
       # 等待一定时间
       - sleep: <ms>
 
@@ -542,6 +646,23 @@ tasks:
   - name: <name>
     flow:
       # ...
+```
+
+`runGherkinScenario` 从 Midscene 1.10 开始支持，目前仍处于 Beta 阶段。支持规则和限制请参考 [BDD 风格脚本（Gherkin）](./advanced/bdd-style-scripts-with-gherkin)。
+
+#### 步骤结果名称
+
+带有 `name` 的步骤会把结果写入当前 YAML 运行结果和 JSON 输出中。使用 `name` 标记需要出现在运行结果里的值。
+
+```yaml
+tasks:
+  - name: 保存提取结果
+    flow:
+      - aiString: 读取页面中的商品 id
+        name: product_id
+
+      - aiQuery: 提交商品 id 后，获取搜索结果
+        name: search_result
 ```
 
 #### 使用 `aiTap` 上传文件
@@ -577,9 +698,10 @@ tasks:
 
 注意：
 
-- `fileChooserAccept` 仅在 web 页面（Playwright、Puppeteer）中可用。
+- `fileChooserAccept` 仅在 web 页面（Playwright、Puppeteer 或 Chrome extension Bridge mode）中可用。
 - 相对路径会基于当前命令执行目录解析，而不是基于 YAML 文件所在目录解析。
 - 如果文件不存在，脚本会在执行点击前直接报错。
+- Chrome extension Bridge mode 不支持目录上传输入框（`webkitdirectory` / `directory`）。如需上传目录，请使用 Playwright。
 
 #### 使用图像提示
 

@@ -10,13 +10,17 @@ import type {
   MidsceneYamlScript,
   MidsceneYamlScriptAgentOpt,
   MidsceneYamlScriptEnv,
+  MidsceneYamlScriptWebEnv,
 } from '@midscene/core';
-import { createAgent } from '@midscene/core/agent';
+import { createAgent, getReportFileName } from '@midscene/core/agent';
 import type { AbstractInterface } from '@midscene/core/device';
 import { processCacheConfig } from '@midscene/core/utils';
 import { getDebug } from '@midscene/shared/logger';
 import { AgentOverChromeBridge } from '@midscene/web/bridge-mode';
-import { puppeteerAgentForTarget } from '@midscene/web/puppeteer-agent-launcher';
+import {
+  buildDownloadBehavior,
+  puppeteerAgentForTarget,
+} from '@midscene/web/puppeteer-agent-launcher';
 import type { Browser, Page } from 'puppeteer';
 import puppeteer from 'puppeteer';
 
@@ -45,6 +49,8 @@ export const launchServer = async (
 /**
  * Resolves reportFileName with proper priority handling.
  * Priority: YAML reportFileName > CLI testId (legacy) > YAML testId (legacy) > fileName
+ * Explicit YAML reportFileName is treated as the exact output name. Generated
+ * legacy fallbacks include a unique suffix to avoid overwriting.
  */
 function resolveReportFileName(
   yamlReportFileName: string | undefined,
@@ -52,7 +58,11 @@ function resolveReportFileName(
   yamlTestId: string | undefined,
   fileName: string,
 ): string {
-  return yamlReportFileName ?? cliTestId ?? yamlTestId ?? fileName;
+  if (yamlReportFileName !== undefined) {
+    return yamlReportFileName;
+  }
+  const baseName = cliTestId ?? yamlTestId ?? fileName;
+  return getReportFileName(baseName);
 }
 
 /**
@@ -112,6 +122,7 @@ export async function createYamlPlayer(
         typeof webTarget !== 'undefined',
         typeof clonedYamlScript.android !== 'undefined',
         typeof clonedYamlScript.ios !== 'undefined',
+        typeof clonedYamlScript.harmony !== 'undefined',
         typeof clonedYamlScript.computer !== 'undefined',
         typeof clonedYamlScript.interface !== 'undefined',
       ].filter(Boolean).length;
@@ -121,6 +132,7 @@ export async function createYamlPlayer(
           typeof webTarget !== 'undefined' ? 'web' : null,
           typeof clonedYamlScript.android !== 'undefined' ? 'android' : null,
           typeof clonedYamlScript.ios !== 'undefined' ? 'ios' : null,
+          typeof clonedYamlScript.harmony !== 'undefined' ? 'harmony' : null,
           typeof clonedYamlScript.computer !== 'undefined' ? 'computer' : null,
           typeof clonedYamlScript.interface !== 'undefined'
             ? 'interface'
@@ -128,7 +140,7 @@ export async function createYamlPlayer(
         ].filter(Boolean);
 
         throw new Error(
-          `Only one target type can be specified, but found multiple: ${specifiedTargets.join(', ')}. Please specify only one of: web, android, ios, computer, or interface.`,
+          `Only one target type can be specified, but found multiple: ${specifiedTargets.join(', ')}. Please specify only one of: web, android, ios, harmony, computer, or interface.`,
         );
       }
 
@@ -178,6 +190,7 @@ export async function createYamlPlayer(
             (await puppeteer.connect({
               browserWSEndpoint: webTarget.cdpEndpoint,
               defaultViewport: null,
+              downloadBehavior: buildDownloadBehavior(webTarget.downloadPath),
             }));
 
           // Warn about options that don't apply to an already-running browser
@@ -244,17 +257,23 @@ export async function createYamlPlayer(
           `bridgeMode config value must be either "newTabWithUrl" or "currentTab", but got ${webTarget.bridgeMode}`,
         );
 
-        if (
-          webTarget.userAgent ||
-          webTarget.viewportWidth != null ||
-          webTarget.viewportHeight != null ||
-          webTarget.deviceScaleFactor != null ||
-          webTarget.waitForNetworkIdle ||
-          webTarget.cookie ||
-          webTarget.chromeArgs
-        ) {
+        const bridgeUnsupportedKeys: (keyof MidsceneYamlScriptWebEnv)[] = [
+          'userAgent',
+          'viewportWidth',
+          'viewportHeight',
+          'deviceScaleFactor',
+          'waitForNetworkIdle',
+          'cookie',
+          'extraHTTPHeaders',
+          'downloadPath',
+          'chromeArgs',
+        ];
+        const ignoredKeys = bridgeUnsupportedKeys.filter(
+          (key) => webTarget[key] != null,
+        );
+        if (ignoredKeys.length > 0) {
           console.warn(
-            'puppeteer options (userAgent, viewportWidth, viewportHeight, deviceScaleFactor, waitForNetworkIdle, cookie, chromeArgs) are not supported in bridge mode. They will be ignored.',
+            `puppeteer options (${ignoredKeys.join(', ')}) are not supported in bridge mode. They will be ignored.`,
           );
         }
 
@@ -338,11 +357,36 @@ export async function createYamlPlayer(
         return { agent, freeFn };
       }
 
+      // handle harmony
+      if (typeof clonedYamlScript.harmony !== 'undefined') {
+        const harmonyTarget = clonedYamlScript.harmony;
+        const { agentFromHdcDevice } = await import('@midscene/harmony');
+        const agent = await agentFromHdcDevice(harmonyTarget?.deviceId, {
+          ...harmonyTarget, // Pass all HarmonyOS config options
+          ...buildAgentOptions(
+            clonedYamlScript.agent,
+            preference.reportFileName,
+            fileName,
+          ),
+        });
+
+        if (harmonyTarget?.launch) {
+          await agent.launch(harmonyTarget.launch);
+        }
+
+        freeFn.push({
+          name: 'destroy_harmony_agent',
+          fn: () => agent.destroy(),
+        });
+
+        return { agent, freeFn };
+      }
+
       // handle computer
       if (typeof clonedYamlScript.computer !== 'undefined') {
         const computerTarget = clonedYamlScript.computer;
-        const { agentFromComputer } = await import('@midscene/computer');
-        const agent = await agentFromComputer({
+        const { agentForComputer } = await import('@midscene/computer');
+        const agent = await agentForComputer({
           ...computerTarget,
           ...buildAgentOptions(
             clonedYamlScript.agent,
@@ -422,7 +466,7 @@ export async function createYamlPlayer(
       }
 
       throw new Error(
-        'No valid interface configuration found in the yaml script, should be either "web", "android", "ios", "computer", or "interface"',
+        'No valid interface configuration found in the yaml script, should be either "web", "android", "ios", "harmony", "computer", or "interface"',
       );
     },
     undefined,

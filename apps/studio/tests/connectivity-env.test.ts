@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getModelEnvConfigError,
+  hasCompleteModelEnvConfig,
   parseEnvEntries,
   parseEnvText,
   resolveModelConnection,
@@ -112,7 +114,40 @@ describe('resolveModelConnection', () => {
   it('reports missing required keys', () => {
     const result = resolveModelConnection({ OPENAI_API_KEY: 'sk' });
     expect(result).toEqual({
+      kind: 'missing-required-keys',
       error: expect.stringContaining('OPENAI_BASE_URL'),
     });
+  });
+
+  it('reports invalid model family as a config error instead of throwing', () => {
+    const source = [
+      'MIDSCENE_MODEL_BASE_URL=https://example.com/v1',
+      'MIDSCENE_MODEL_API_KEY=sk-test',
+      'MIDSCENE_MODEL_NAME=qwen3-vl-plus',
+      'MIDSCENE_MODEL_FAMILY=1',
+    ].join('\n');
+
+    const result = resolveModelConnection(parseEnvText(source));
+
+    expect(result).toEqual({
+      kind: 'invalid-config',
+      error: expect.stringContaining('Invalid MIDSCENE_MODEL_FAMILY value: 1'),
+    });
+    expect(hasCompleteModelEnvConfig(source)).toBe(false);
+    expect(getModelEnvConfigError(source)).toContain(
+      'Invalid MIDSCENE_MODEL_FAMILY value: 1',
+    );
+  });
+
+  it('treats OpenAI-compatible env aliases as a complete Studio model config', () => {
+    const source = [
+      'OPENAI_BASE_URL="https://ark-cn-beijing.bytedance.net/api/v3"',
+      'OPENAI_API_KEY="test-key"',
+      "MIDSCENE_MODEL_NAME='ep-20260106114946-bvnpl'",
+      'MIDSCENE_USE_DOUBAO_VISION=1',
+      'MIDSCENE_OPENAI_INIT_CONFIG_JSON=\'{ "REPORT_SERVER_URL":"https://cloudapi.bytedance.net/faas/services/tt9i74/invoke/midscene-log"}\'',
+    ].join('\n');
+
+    expect(hasCompleteModelEnvConfig(source)).toBe(true);
   });
 });

@@ -1,13 +1,11 @@
 import './index.less';
 import { useAllCurrentTasks, useExecutionDump } from '@/components/store';
-import type {
-  AIUsageInfo,
-  ExecutionTask,
-  ExecutionTaskPlanningLocate,
-} from '@midscene/core';
+import type { AIUsageInfo, ExecutionTask } from '@midscene/core';
+import { deriveTaskStatus } from '@midscene/core';
 import { typeStr } from '@midscene/core/agent';
 import {
   type AnimationScript,
+  fullTimeStrWithMilliseconds,
   iconForStatus,
   timeCostStrElement,
 } from '@midscene/visualizer';
@@ -17,6 +15,11 @@ import CameraIcon from '../../icons/camera.svg?react';
 import MessageIcon from '../../icons/message.svg?react';
 import PlayIcon from '../../icons/play.svg?react';
 import type { PlaywrightTasks } from '../../types';
+import {
+  hasDeepLocateFlag,
+  hasDeepThinkFlag,
+} from '../../utils/report-task-tags';
+import { anchorIdForTask } from '../../utils/task-anchor';
 import ReportOverview from '../report-overview';
 
 // Extended task type with searchAreaUsage
@@ -49,6 +52,9 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
     setReplayAllMode,
   } = props;
   const groupedDump = useExecutionDump((store) => store.dump);
+  const playwrightAttributes = useExecutionDump(
+    (store) => store.playwrightAttributes,
+  );
   const setActiveTask = useExecutionDump((store) => store.setActiveTask);
   const activeTask = useExecutionDump((store) => store.activeTask);
   const setHoverTask = useExecutionDump((store) => store.setHoverTask);
@@ -121,28 +127,12 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
 
   // Helper functions for rendering
   const getStatusIcon = (task: ExecutionTaskWithSearchAreaUsage) => {
-    const isFinished = task.status === 'finished';
-    const isError = isFinished && (task.error || task.errorMessage);
-
-    if (isError) {
-      return iconForStatus('failed');
-    }
-
-    const isAssertFinishedWithWarning =
-      isFinished && task.subType === 'WaitFor' && task.output === false;
-
-    if (isAssertFinishedWithWarning) {
-      return iconForStatus('finishedWithWarning');
-    }
-
-    const isAssertFailed =
-      task.subType === 'Assert' && isFinished && task.output === false;
-
-    if (isAssertFailed) {
-      return iconForStatus('failed');
-    }
-
-    return iconForStatus(task.status);
+    // Share the same failure semantics as the merged-report status derivation
+    // (deriveTaskStatus) so step icons and merged Passed/Failed never diverge.
+    const status = deriveTaskStatus(task);
+    // `warning` maps to the dedicated warning icon; every other value is a
+    // status string iconForStatus already understands.
+    return iconForStatus(status === 'warning' ? 'finishedWithWarning' : status);
   };
 
   const getTitleIcon = (task: ExecutionTaskWithSearchAreaUsage) => {
@@ -202,7 +192,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
   };
 
   const getDeepLocateTag = (task: ExecutionTaskWithSearchAreaUsage) => {
-    return (task as ExecutionTaskPlanningLocate)?.param?.deepLocate ? (
+    return hasDeepLocateFlag(task) ? (
       <Tag
         className="deeplocate-tag"
         bordered={false}
@@ -219,12 +209,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
   };
 
   const getDeepThinkTag = (task: ExecutionTaskWithSearchAreaUsage) => {
-    // deepThink is an aiAct planning-phase option, not a per-locate-task param.
-    // It is not stored in ExecutionTaskPlanningLocate.param; using a generic cast
-    // here to avoid incorrectly coupling it to the locate task type.
-    const param = (task as ExecutionTask & { param?: { deepThink?: boolean } })
-      ?.param;
-    return param?.deepThink ? (
+    return hasDeepThinkFlag(task) ? (
       <Tag
         className="deepthink-tag"
         bordered={false}
@@ -238,6 +223,27 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
         DeepThink
       </Tag>
     ) : null;
+  };
+
+  const getXPathTag = (task: ExecutionTaskWithSearchAreaUsage) => {
+    if (task.hitBy?.from !== 'User expected path') {
+      return null;
+    }
+
+    return (
+      <Tag
+        className="xpath-tag"
+        style={{
+          padding: '0 4px',
+          marginLeft: '4px',
+          marginRight: 0,
+          lineHeight: '16px',
+        }}
+        bordered={false}
+      >
+        XPath
+      </Tag>
+    );
   };
 
   const getStatusText = (task: ExecutionTaskWithSearchAreaUsage) => {
@@ -471,6 +477,62 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
     0,
   );
 
+  // Calculate total time cost
+  const timingRange = useMemo(() => {
+    if (!groupedDump) return null;
+
+    let earliest: number | null = null;
+    let latest: number | null = null;
+
+    groupedDump.executions.forEach((execution) => {
+      execution.tasks.forEach((task) => {
+        const timestamps = [task.timing?.start, task.timing?.end].filter(
+          (timestamp): timestamp is number => typeof timestamp === 'number',
+        );
+
+        timestamps.forEach((timestamp) => {
+          earliest =
+            earliest === null ? timestamp : Math.min(earliest, timestamp);
+          latest = latest === null ? timestamp : Math.max(latest, timestamp);
+        });
+      });
+    });
+
+    if (earliest === null || latest === null) {
+      return null;
+    }
+
+    return {
+      earliest,
+      latest,
+      duration: Math.max(0, latest - earliest),
+    };
+  }, [groupedDump]);
+
+  const totalTimeCost = useMemo(() => {
+    if (timingRange) {
+      return timingRange.duration;
+    }
+
+    return playwrightAttributes?.playwright_test_duration || 0;
+  }, [timingRange, playwrightAttributes]);
+
+  const totalTimeTooltip = useMemo(() => {
+    if (!timingRange) return null;
+    return (
+      <div className="total-time-tooltip-content">
+        <span className="total-time-tooltip-label">Start</span>
+        <span className="total-time-tooltip-value">
+          {fullTimeStrWithMilliseconds(timingRange.earliest)}
+        </span>
+        <span className="total-time-tooltip-label">End</span>
+        <span className="total-time-tooltip-value">
+          {fullTimeStrWithMilliseconds(timingRange.latest)}
+        </span>
+      </div>
+    );
+  }, [timingRange]);
+
   // Keyboard navigation
   useEffect(() => {
     // all tasks
@@ -534,6 +596,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
             {getCacheTag(task)}
             {getDomIncludedTag(task)}
             {getDeepLocateTag(task)}
+            {getXPathTag(task)}
             {getDeepThinkTag(task)}
           </div>
         );
@@ -603,8 +666,14 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
           <div className="table-body">
             {tableData.map((record) => {
               if (record.isGroupHeader) {
+                // Group headers are not selectable; the id only makes them a
+                // plain `#group-<index>` scroll target, with no hash sync.
                 return (
-                  <div key={record.key} className="group-header-row">
+                  <div
+                    key={record.key}
+                    id={record.key}
+                    className="group-header-row"
+                  >
                     <div className="side-sub-title">{record.groupName}</div>
                   </div>
                 );
@@ -614,10 +683,14 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
               const isSelected = task === activeTask;
               const isPlaying = task === playingTask;
               const taskId = task.taskId;
+              // Single source of truth for the anchor format so the row id,
+              // the hash we write, and the hash we resolve never drift apart.
+              const anchorId = anchorIdForTask(task);
 
               return (
                 <div
                   key={record.key}
+                  id={anchorId}
                   data-task-id={taskId}
                   className={`task-row ${isSelected ? 'selected' : ''} ${isPlaying ? 'playing' : ''}`}
                   onClick={() => {
@@ -657,10 +730,64 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
           </div>
 
           {/* Summary */}
-          {proModeEnabled && (
-            <div className="table-summary">
-              <div className="side-seperator side-seperator-line side-seperator-space-up" />
-              {(() => {
+          <div className="table-summary">
+            <div className="side-seperator side-seperator-line side-seperator-space-up" />
+            {/* Total time row - always visible */}
+            <div className="summary-row">
+              <div
+                className="summary-cell column-type"
+                style={{
+                  minWidth: typeColumnMinWidth,
+                  flex: 1,
+                }}
+              >
+                <div className="token-total-label">Total Time</div>
+              </div>
+              <div
+                className="summary-cell column-time"
+                style={{ width: dynamicWidths.time }}
+              >
+                <span className="token-value">
+                  {timingRange ? (
+                    <Tooltip title={totalTimeTooltip}>
+                      {timeCostStrElement(totalTimeCost)}
+                    </Tooltip>
+                  ) : (
+                    timeCostStrElement(totalTimeCost)
+                  )}
+                </span>
+              </div>
+              {proModeEnabled && (
+                <>
+                  <div
+                    className="summary-cell column-intent"
+                    style={{ width: dynamicWidths.intent }}
+                  />
+                  <div
+                    className="summary-cell column-model"
+                    style={{ width: dynamicWidths.model }}
+                  />
+                  <div
+                    className="summary-cell column-prompt"
+                    style={{ width: dynamicWidths.prompt }}
+                  />
+                  {hasCachedInput && (
+                    <div
+                      className="summary-cell column-cached"
+                      style={{ width: dynamicWidths.cached }}
+                    />
+                  )}
+                  <div
+                    className="summary-cell column-completion"
+                    style={{ width: dynamicWidths.completion }}
+                  />
+                </>
+              )}
+            </div>
+
+            {/* Token usage rows - only in pro mode */}
+            {proModeEnabled &&
+              (() => {
                 const modelEntries = Array.from(tokensByModel.entries());
                 const hasMultipleModels = modelEntries.length > 1;
 
@@ -708,7 +835,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
                       </div>
                     ))
                   : [
-                      <div key="total" className="summary-row">
+                      <div key="total-tokens" className="summary-row">
                         <div
                           className="summary-cell column-type"
                           style={{
@@ -747,8 +874,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
                       </div>,
                     ];
               })()}
-            </div>
-          )}
+          </div>
         </div>
         <div className="executions-tip">
           <span className="tip-icon">?</span>

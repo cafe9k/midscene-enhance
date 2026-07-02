@@ -6,6 +6,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import path from 'node:path';
 import { BatchRunner } from '@/batch-runner';
 import { createYamlPlayer } from '@/create-yaml-player';
 import type {
@@ -61,7 +62,18 @@ vi.mock('@midscene/web/puppeteer-agent-launcher', async (importOriginal) => {
     await importOriginal<
       typeof import('@midscene/web/puppeteer-agent-launcher')
     >();
-  return { ...original };
+  return {
+    ...original,
+    buildDownloadBehavior: (downloadPath: string | undefined) =>
+      downloadPath
+        ? {
+            policy: 'allow',
+            downloadPath: downloadPath.startsWith('/')
+              ? downloadPath
+              : `${process.cwd()}/${downloadPath.replace(/^\.\//, '')}`,
+          }
+        : undefined,
+  };
 });
 vi.mock('@midscene/web/bridge-mode');
 vi.mock('@midscene/android');
@@ -213,6 +225,30 @@ describe('BatchRunner', () => {
       expect(launchCall).toHaveProperty('acceptInsecureCerts', true);
     });
 
+    test('should pass downloadPath to Puppeteer launch options when shareBrowserContext is true', async () => {
+      const config = {
+        ...mockBatchConfig,
+        shareBrowserContext: true,
+        files: ['web1.yml'],
+        globalConfig: {
+          web: {
+            url: 'http://example.com',
+            downloadPath: './downloads',
+          },
+        },
+      };
+      const runner = new BatchRunner(config);
+      await runner.run();
+
+      expect(puppeteer.launch).toHaveBeenCalledTimes(1);
+
+      const launchCall = vi.mocked(puppeteer.launch).mock.calls[0][0];
+      expect(launchCall).toHaveProperty('downloadBehavior', {
+        policy: 'allow',
+        downloadPath: path.resolve('./downloads'),
+      });
+    });
+
     test('should not create a shared browser instance when shareBrowserContext is false', async () => {
       const config = {
         ...mockBatchConfig,
@@ -273,9 +309,36 @@ describe('BatchRunner', () => {
       expect(puppeteer.connect).toHaveBeenCalledWith({
         browserWSEndpoint: 'ws://localhost:9222/devtools/browser/xxx',
         defaultViewport: null,
+        downloadBehavior: undefined,
       });
       // Should NOT call launch
       expect(puppeteer.launch).not.toHaveBeenCalled();
+    });
+
+    test('should pass downloadPath to Puppeteer connect options when shareBrowserContext uses CDP', async () => {
+      const config = {
+        ...mockBatchConfig,
+        shareBrowserContext: true,
+        files: ['web1.yml'],
+        globalConfig: {
+          web: {
+            url: 'http://example.com',
+            cdpEndpoint: 'ws://localhost:9222/devtools/browser/xxx',
+            downloadPath: './downloads',
+          },
+        },
+      };
+      const runner = new BatchRunner(config);
+      await runner.run();
+
+      expect(puppeteer.connect).toHaveBeenCalledWith({
+        browserWSEndpoint: 'ws://localhost:9222/devtools/browser/xxx',
+        defaultViewport: null,
+        downloadBehavior: {
+          policy: 'allow',
+          downloadPath: path.resolve('./downloads'),
+        },
+      });
     });
 
     test('should disconnect (not close) browser in CDP mode', async () => {
@@ -333,10 +396,8 @@ describe('BatchRunner', () => {
         createMockPlayer(true),
       );
       const executor = new BatchRunner(mockBatchConfig);
-      const results = await executor.run({
-        keepWindow: true,
-        headed: true,
-      });
+      // @ts-ignore Preserve this historical options-call fixture while the runtime API now reads options from BatchRunnerConfig.
+      const results = await executor.run({ keepWindow: true, headed: true });
       expect(results).toHaveLength(3);
       expect(results.every((r) => r.success)).toBe(true);
     });
@@ -425,6 +486,93 @@ describe('BatchRunner', () => {
       expect(summaryContent.summary).toHaveProperty('failed', 0);
       expect(summaryContent.summary).toHaveProperty('generatedAt');
       expect(summaryContent.results).toHaveLength(3);
+    });
+  });
+
+  describe('setup execution', () => {
+    const setupConfig = {
+      ...mockBatchConfig,
+      shareBrowserContext: true,
+      setup: 'login.yml',
+      files: ['search.yml', 'report.yml'],
+      concurrent: 2,
+    };
+
+    const trackRunOrder = (
+      runOrder: string[],
+      shouldSucceed: (file: string) => boolean,
+    ) => {
+      vi.mocked(createYamlPlayer).mockImplementation(async (file) => {
+        const player = createMockPlayer(shouldSucceed(file as string));
+        const originalRun = player.run;
+        (player as unknown as { run: () => Promise<void> }).run = vi.fn(
+          async () => {
+            runOrder.push(file as string);
+            return originalRun();
+          },
+        );
+        return player;
+      });
+    };
+
+    test('runs the setup file before the main files and executes all', async () => {
+      const runOrder: string[] = [];
+      trackRunOrder(runOrder, () => true);
+
+      const runner = new BatchRunner(setupConfig);
+      await runner.run();
+
+      expect(runOrder[0]).toBe('login.yml');
+      expect(runOrder).toContain('search.yml');
+      expect(runOrder).toContain('report.yml');
+      expect(runner.getNotExecutedFiles()).toEqual([]);
+      expect(runner.getSuccessfulFiles().sort()).toEqual([
+        'login.yml',
+        'report.yml',
+        'search.yml',
+      ]);
+    });
+
+    test('aborts main files when the setup file fails', async () => {
+      const runOrder: string[] = [];
+      trackRunOrder(runOrder, (file) => file !== 'login.yml');
+
+      const runner = new BatchRunner(setupConfig);
+      await runner.run();
+
+      // The main files must never run once the prerequisite setup fails.
+      expect(runOrder).toEqual(['login.yml']);
+      expect(runner.getFailedFiles()).toEqual(['login.yml']);
+      expect(runner.getNotExecutedFiles().sort()).toEqual([
+        'report.yml',
+        'search.yml',
+      ]);
+    });
+
+    test('throws when setup is set without shareBrowserContext', async () => {
+      const config = {
+        ...mockBatchConfig,
+        shareBrowserContext: false,
+        setup: 'login.yml',
+        files: ['search.yml'],
+      };
+      const runner = new BatchRunner(config);
+      await expect(runner.run()).rejects.toThrow(
+        'setup requires shareBrowserContext: true',
+      );
+    });
+
+    test('throws when a yaml file is both the setup and a main file', async () => {
+      const config = {
+        ...mockBatchConfig,
+        shareBrowserContext: true,
+        setup: 'login.yml',
+        files: ['login.yml', 'search.yml'],
+      };
+      const runner = new BatchRunner(config);
+      await expect(runner.run()).rejects.toThrow(
+        'is used as both the setup file and a main file',
+      );
     });
   });
 

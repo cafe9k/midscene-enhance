@@ -5,8 +5,10 @@ import SettingsDock from '../src/renderer/components/SettingsDock';
 import SettingsPanel from '../src/renderer/components/SettingsPanel';
 import { ThemeProvider } from '../src/renderer/theme/ThemeProvider';
 
+(globalThis as { __APP_VERSION__?: string }).__APP_VERSION__ = 'test-version';
+
 describe('studio sidebar settings entrypoints', () => {
-  it('renders only a single Env quick action in the bottom dock', () => {
+  it('renders Settings and Model Config as stacked rows in the bottom dock', () => {
     const html = renderToStaticMarkup(
       createElement(SettingsDock, {
         onEnvClick: () => undefined,
@@ -15,22 +17,23 @@ describe('studio sidebar settings entrypoints', () => {
       }),
     );
 
-    expect(html).toContain('Env');
-    expect(html).not.toContain('Model');
+    expect(html).toContain('Settings');
+    expect(html).toContain('Model Config');
+    expect(html).not.toContain('>Env<');
   });
 
-  it('keeps Environment in the settings panel and removes the duplicate Model row', () => {
+  it('keeps the settings panel focused on app preferences without a model config row', () => {
     const html = renderToStaticMarkup(
-      createElement(
-        ThemeProvider,
-        null,
-        createElement(SettingsPanel, {
-          onEnvConfigClick: () => undefined,
-        }),
-      ),
+      createElement(ThemeProvider, null, createElement(SettingsPanel, {})),
     );
 
-    expect(html).toContain('Environment');
-    expect(html).not.toContain('Model');
+    // Language is intentionally hidden until i18n ships (storage hook
+    // still runs in the background).
+    expect(html).not.toContain('Language');
+    expect(html).toContain('Theme');
+    expect(html).toContain('GitHub');
+    expect(html).toContain('Website');
+    expect(html).not.toContain('Environment');
+    expect(html).not.toContain('Model Config');
   });
 });

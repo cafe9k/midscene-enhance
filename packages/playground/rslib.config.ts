@@ -1,4 +1,5 @@
 import { defineConfig } from '@rslib/core';
+import { createTypeCheckPlugin } from '../../scripts/rsbuild-utils.ts';
 import { version } from './package.json';
 
 export default defineConfig({
@@ -28,11 +29,16 @@ export default defineConfig({
     },
   ],
   source: {
+    tsconfigPath: 'tsconfig.build.json',
     define: {
       __VERSION__: JSON.stringify(version),
     },
   },
   output: {
     sourceMap: true,
+  },
+  plugins: [createTypeCheckPlugin()],
+  performance: {
+    buildCache: false,
   },
 });

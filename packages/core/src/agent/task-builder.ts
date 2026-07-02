@@ -1,8 +1,11 @@
 import { findAllMidsceneLocatorField, parseActionParam } from '@/ai-model';
+import type { ModelRuntime } from '@/ai-model/models';
+import { findActionInActionSpaceOrThrow } from '@/common';
 import type { AbstractInterface } from '@/device';
 import type Service from '@/service';
 import { setTimingFieldOnce } from '@/task-timing';
 import type {
+  AIUsageInfo,
   DetailedLocateParam,
   DeviceAction,
   ElementCacheFeature,
@@ -19,13 +22,13 @@ import type {
 } from '@/types';
 import { ServiceError } from '@/types';
 import { sleep } from '@/utils';
-import type { IModelConfig } from '@midscene/shared/env';
 import { generateElementByRect } from '@midscene/shared/extractor';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
 import type { TaskCache } from './task-cache';
+import { withUsageIntent } from './usage-intent';
 import {
-  ifPlanLocateParamIsBbox,
+  ifPlanLocateParamHasLocatedPixelBbox,
   matchElementFromCache,
   matchElementFromPlan,
   transformLogicalElementToScreenshot,
@@ -46,8 +49,47 @@ function hasNonEmptyCache(cache: unknown): boolean {
   );
 }
 
+function invalidLocateElementReason(
+  element: LocateResultElement,
+): string | undefined {
+  const values = [
+    element.center?.[0],
+    element.center?.[1],
+    element.rect?.left,
+    element.rect?.top,
+    element.rect?.width,
+    element.rect?.height,
+  ];
+  if (
+    values.some((value) => typeof value !== 'number' || !Number.isFinite(value))
+  ) {
+    return `Invalid locate result coordinates: ${JSON.stringify(element)}`;
+  }
+  if (element.rect.width <= 0 || element.rect.height <= 0) {
+    return `Invalid locate result rect size: ${JSON.stringify(element)}`;
+  }
+  return undefined;
+}
+
+type LocateParamWithDeprecatedAlias = DetailedLocateParam & {
+  deepThink?: boolean;
+};
+
+function normalizeLocateParam(
+  param: string | DetailedLocateParam,
+): DetailedLocateParam {
+  if (typeof param === 'string') {
+    return { prompt: param };
+  }
+
+  const { deepThink, ...rest } = param as LocateParamWithDeprecatedAlias;
+  const deepLocate = rest.deepLocate ?? deepThink;
+
+  return deepLocate === undefined ? rest : { ...rest, deepLocate };
+}
+
 export function locatePlanForLocate(param: string | DetailedLocateParam) {
-  const locate = typeof param === 'string' ? { prompt: param } : param;
+  const locate = normalizeLocateParam(param);
   const locatePlan: PlanningAction<PlanningLocateParam> = {
     type: 'Locate',
     param: locate,
@@ -72,8 +114,8 @@ interface BuildOptions {
 
 interface PlanBuildContext {
   tasks: ExecutionTaskApply[];
-  modelConfigForPlanning: IModelConfig;
-  modelConfigForDefaultIntent: IModelConfig;
+  planningModel: ModelRuntime;
+  defaultModel: ModelRuntime;
   cacheable?: boolean;
   deepLocate?: boolean;
   abortSignal?: AbortSignal;
@@ -106,8 +148,8 @@ export class TaskBuilder {
 
   public async build(
     plans: PlanningAction[],
-    modelConfigForPlanning: IModelConfig,
-    modelConfigForDefaultIntent: IModelConfig,
+    planningModel: ModelRuntime,
+    defaultModel: ModelRuntime,
     options?: BuildOptions,
   ): Promise<{ tasks: ExecutionTaskApply[] }> {
     const tasks: ExecutionTaskApply[] = [];
@@ -115,8 +157,8 @@ export class TaskBuilder {
 
     const context: PlanBuildContext = {
       tasks,
-      modelConfigForPlanning,
-      modelConfigForDefaultIntent,
+      planningModel,
+      defaultModel,
       cacheable,
       deepLocate: options?.deepLocate,
       abortSignal: options?.abortSignal,
@@ -177,32 +219,27 @@ export class TaskBuilder {
   ): Promise<void> {
     const planType = plan.type;
     const actionSpace = this.actionSpace;
-    const action = actionSpace.find((item) => item.name === planType);
+    const action = findActionInActionSpaceOrThrow(planType, actionSpace);
     const param = plan.param;
 
-    if (!action) {
-      throw new Error(`Action type '${planType}' not found`);
-    }
+    const locateFields = findAllMidsceneLocatorField(action.paramSchema);
 
-    const locateFields = action
-      ? findAllMidsceneLocatorField(action.paramSchema)
-      : [];
-
-    const requiredLocateFields = action
-      ? findAllMidsceneLocatorField(action.paramSchema, true)
-      : [];
+    const requiredLocateFields = findAllMidsceneLocatorField(
+      action.paramSchema,
+      true,
+    );
 
     locateFields.forEach((field) => {
       if (param[field]) {
-        // Always use createLocateTask for all locate params (including bbox)
-        // This ensures cache writing happens even when bbox is available
+        // Always use createLocateTask for all locate params.
+        // This ensures cache writing happens even when locatedPixelBbox is available
         const locatePlan = locatePlanForLocate(param[field]);
         debug(
           'will prepend locate param for field',
           `action.type=${planType}`,
           `param=${JSON.stringify(param[field])}`,
           `locatePlan=${JSON.stringify(locatePlan)}`,
-          `hasBbox=${ifPlanLocateParamIsBbox(param[field])}`,
+          `hasLocatedPixelBbox=${ifPlanLocateParamHasLocatedPixelBbox(param[field])}`,
         );
         const locateTask = this.createLocateTask(
           locatePlan,
@@ -253,6 +290,7 @@ export class TaskBuilder {
         });
 
         setTimingFieldOnce(timing, 'beforeInvokeActionHookStart');
+        const delayBeforeRunner = action.delayBeforeRunner ?? 200;
         try {
           await Promise.all([
             (async () => {
@@ -266,7 +304,9 @@ export class TaskBuilder {
                 );
               }
             })(),
-            sleep(200),
+            delayBeforeRunner > 0
+              ? sleep(delayBeforeRunner)
+              : Promise.resolve(),
           ]);
         } catch (originalError: any) {
           const originalMessage =
@@ -350,16 +390,9 @@ export class TaskBuilder {
     context: PlanBuildContext,
     onResult?: (result: LocateResultElement) => void,
   ): ExecutionTaskPlanningLocateApply {
-    const { cacheable, modelConfigForDefaultIntent, deepLocate, abortSignal } =
-      context;
+    const { cacheable, defaultModel, deepLocate, abortSignal } = context;
 
-    let locateParam = detailedLocateParam;
-
-    if (typeof locateParam === 'string') {
-      locateParam = {
-        prompt: locateParam,
-      };
-    }
+    let locateParam = normalizeLocateParam(detailedLocateParam);
 
     if (cacheable !== undefined) {
       locateParam = {
@@ -383,10 +416,15 @@ export class TaskBuilder {
       executor: async (param, taskContext) => {
         const { task } = taskContext;
         let { uiContext } = taskContext;
+        const paramWithLocatedPixelBbox = ifPlanLocateParamHasLocatedPixelBbox(
+          param,
+        )
+          ? param
+          : undefined;
 
         assert(
-          param?.prompt || param?.bbox,
-          `No prompt or id or position or bbox to locate, param=${JSON.stringify(
+          param?.prompt || paramWithLocatedPixelBbox,
+          `No prompt or id or position or locatedPixelBbox to locate, param=${JSON.stringify(
             param,
           )}`,
         );
@@ -416,8 +454,12 @@ export class TaskBuilder {
           task.log = {
             dump,
             rawResponse: dump.taskInfo?.rawResponse,
+            rawChoiceMessage: dump.taskInfo?.rawChoiceMessage,
+            searchAreaRawChoiceMessage:
+              dump.taskInfo?.searchAreaRawChoiceMessage,
           };
-          task.usage = dump.taskInfo?.usage;
+          task.usage = withUsageIntent(dump.taskInfo?.usage, 'default');
+          task.searchArea = dump.taskInfo?.searchArea;
           if (dump.taskInfo?.searchAreaUsage) {
             task.searchAreaUsage = dump.taskInfo.searchAreaUsage;
           }
@@ -426,22 +468,22 @@ export class TaskBuilder {
           }
         };
 
-        const planLocatedElement = ifPlanLocateParamIsBbox(param)
-          ? matchElementFromPlan(param)
+        const planLocatedElement = paramWithLocatedPixelBbox
+          ? matchElementFromPlan(paramWithLocatedPixelBbox)
           : undefined;
 
-        // from bbox (plan hit)
-        // when deepLocate is enabled, bbox should be used as search area hint,
-        // not as a final direct hit
-        const elementFromBbox = param.deepLocate
+        // from locatedPixelBbox (direct plan hit)
+        // when deepLocate is enabled, locatedPixelBbox should be used as search
+        // area hint, not as a final direct hit
+        const elementFromPlan = param.deepLocate
           ? undefined
           : planLocatedElement;
-        const isPlanHit = !!elementFromBbox;
+        const isPlanDirectHit = !!elementFromPlan;
 
         // from xpath
         let rectFromXpath: Rect | undefined;
         if (
-          !isPlanHit &&
+          !isPlanDirectHit &&
           param.xpath &&
           this.interface.rectMatchesCacheFeature
         ) {
@@ -474,7 +516,7 @@ export class TaskBuilder {
         const cacheEntry = locateCacheRecord?.cacheContent?.cache;
 
         const elementFromCacheResult =
-          isPlanHit || isXpathHit
+          isPlanDirectHit || isXpathHit
             ? null
             : await matchElementFromCache(
                 {
@@ -498,7 +540,7 @@ export class TaskBuilder {
 
         let elementFromAiLocate: LocateResultElement | null | undefined;
         const timing = taskContext.task.timing;
-        if (!isXpathHit && !isCacheHit && !isPlanHit) {
+        if (!isXpathHit && !isCacheHit && !isPlanDirectHit) {
           try {
             setTimingFieldOnce(timing, 'callAiStart');
             locateResult = await this.service.locate(
@@ -507,7 +549,7 @@ export class TaskBuilder {
                 context: uiContext,
                 planLocatedElement,
               },
-              modelConfigForDefaultIntent,
+              defaultModel,
               abortSignal,
             );
             applyDump(locateResult.dump);
@@ -523,10 +565,20 @@ export class TaskBuilder {
         }
 
         const element =
-          elementFromBbox ||
+          elementFromPlan ||
           elementFromXpath ||
           elementFromCache ||
           elementFromAiLocate;
+
+        if (element) {
+          const invalidElementReason = invalidLocateElementReason(element);
+          if (invalidElementReason) {
+            if (locateDump) {
+              throw new ServiceError(invalidElementReason, locateDump);
+            }
+            throw new Error(invalidElementReason);
+          }
+        }
 
         // Check if locate cache already exists (for planHitFlag case)
         const locateCacheAlreadyExists = hasNonEmptyCache(
@@ -544,7 +596,7 @@ export class TaskBuilder {
           element &&
           this.taskCache &&
           !isCacheHit &&
-          (!isPlanHit || !locateCacheAlreadyExists) &&
+          (!isPlanDirectHit || !locateCacheAlreadyExists) &&
           param?.cacheable !== false
         ) {
           if (this.interface.cacheFeatureForPoint) {
@@ -571,7 +623,7 @@ export class TaskBuilder {
                     typeof param.prompt === 'string'
                       ? param.prompt
                       : param.prompt?.prompt,
-                  modelConfig: modelConfigForDefaultIntent,
+                  modelRuntime: defaultModel,
                 },
               );
               if (hasNonEmptyCache(feature)) {
@@ -615,11 +667,11 @@ export class TaskBuilder {
 
         let hitBy: ExecutionTaskHitBy | undefined;
 
-        if (isPlanHit) {
+        if (isPlanDirectHit && paramWithLocatedPixelBbox) {
           hitBy = {
             from: 'Plan',
             context: {
-              bbox: param.bbox,
+              locatedPixelBbox: paramWithLocatedPixelBbox.locatedPixelBbox,
             },
           };
         } else if (isXpathHit) {

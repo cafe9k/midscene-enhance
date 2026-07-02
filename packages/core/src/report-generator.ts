@@ -20,6 +20,7 @@ import {
 } from '@midscene/shared/env';
 import { ifInBrowser, logMsg, uuid } from '@midscene/shared/utils';
 import {
+  DATA_SCREENSHOT_MODE_ATTR,
   generateDumpScriptTag,
   generateImageScriptTag,
   getBaseUrlFixScript,
@@ -30,6 +31,7 @@ import {
   ReportActionDump,
   type ReportAttributes,
   type ReportMeta,
+  type ScreenshotMode,
 } from './types';
 import { getReportTpl } from './utils';
 
@@ -86,7 +88,7 @@ export function assertReportGenerationOptions(opts: {
 
 export class ReportGenerator implements IReportGenerator {
   private reportPath: string;
-  private screenshotMode: 'inline' | 'directory';
+  private screenshotMode: ScreenshotMode;
   private shouldPersistExecutionDump: boolean;
   private autoPrint: boolean;
   private firstWriteDone = false;
@@ -111,9 +113,10 @@ export class ReportGenerator implements IReportGenerator {
 
   constructor(options: {
     reportPath: string;
-    screenshotMode: 'inline' | 'directory';
+    screenshotMode: ScreenshotMode;
     persistExecutionDump?: boolean;
     autoPrint?: boolean;
+    reuseExistingReport?: boolean;
   }) {
     this.reportPath = options.reportPath;
     this.screenshotMode = options.screenshotMode;
@@ -132,8 +135,9 @@ export class ReportGenerator implements IReportGenerator {
       },
       alsoWriteFileCopy: this.shouldPersistExecutionDump,
     });
-    this.hydrateStateFromExistingReport();
-    this.printReportPath('will be generated at');
+    if (options.reuseExistingReport) {
+      this.hydrateStateFromExistingReport();
+    }
   }
 
   static create(
@@ -143,14 +147,15 @@ export class ReportGenerator implements IReportGenerator {
       persistExecutionDump?: boolean;
       outputFormat?: 'single-html' | 'html-and-external-assets';
       autoPrintReportMsg?: boolean;
+      reuseExistingReport?: boolean;
     },
   ): IReportGenerator {
     assertReportGenerationOptions(opts);
+    validateReportFileName(reportFileName);
     if (opts.generateReport === false) return nullReportGenerator;
 
     // In browser environment, file system is not available
     if (ifInBrowser) return nullReportGenerator;
-    validateReportFileName(reportFileName);
 
     const reportRootDir = getMidsceneRunSubDir('report');
     const outputDir = join(reportRootDir, reportFileName);
@@ -166,6 +171,7 @@ export class ReportGenerator implements IReportGenerator {
           : 'inline',
       persistExecutionDump: opts.persistExecutionDump,
       autoPrint: opts.autoPrintReportMsg,
+      reuseExistingReport: opts.reuseExistingReport,
     });
   }
 
@@ -200,7 +206,6 @@ export class ReportGenerator implements IReportGenerator {
       return undefined;
     }
 
-    this.printReportPath('finalized');
     return this.reportPath;
   }
 
@@ -208,17 +213,17 @@ export class ReportGenerator implements IReportGenerator {
     return this.reportPath;
   }
 
-  private printReportPath(verb: string): void {
+  private printReportPath(): void {
     if (!this.autoPrint || !this.reportPath) return;
     if (globalConfigManager.getEnvConfigInBoolean(MIDSCENE_REPORT_QUIET))
       return;
 
     if (this.screenshotMode === 'directory') {
       logMsg(
-        `Midscene - report ${verb}: npx serve ${dirname(this.reportPath)}`,
+        `Midscene - report file updated: npx serve ${dirname(this.reportPath)}`,
       );
     } else {
-      logMsg(`Midscene - report ${verb}: ${this.reportPath}`);
+      logMsg(`Midscene - report file updated: ${this.reportPath}`);
     }
   }
 
@@ -240,7 +245,7 @@ export class ReportGenerator implements IReportGenerator {
 
     if (!this.firstWriteDone) {
       this.firstWriteDone = true;
-      this.printReportPath('generated');
+      this.printReportPath();
     }
   }
 
@@ -251,9 +256,6 @@ export class ReportGenerator implements IReportGenerator {
 
     for (const [key, value] of Object.entries(attributes)) {
       if (value === undefined || value === null) {
-        continue;
-      }
-      if (key === 'data-group-id') {
         continue;
       }
       this.reportAttributes[key] = String(value);
@@ -287,6 +289,9 @@ export class ReportGenerator implements IReportGenerator {
   private getDumpScriptAttributes(): Record<string, string> {
     return {
       'data-group-id': this.reportStreamId,
+      // Self-describe how this report file stores screenshots so consumers
+      // (merge/delete) never have to guess the mode from the filesystem.
+      [DATA_SCREENSHOT_MODE_ATTR]: this.screenshotMode,
       ...this.reportAttributes,
     };
   }

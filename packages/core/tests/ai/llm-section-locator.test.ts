@@ -1,11 +1,13 @@
-import { AiLocateSection } from '@/ai-model/inspect';
+import { getModelRuntime } from '@/ai-model/models';
+import { AiLocateSection } from '@/ai-model/workflows/inspect';
 import { getTmpFile } from '@/utils';
 import { globalModelConfigManager } from '@midscene/shared/env';
 import { saveBase64Image } from '@midscene/shared/img';
-import { getContextFromFixture } from 'tests/evaluation';
 import { expect, test } from 'vitest';
+import { getContextFromFixture } from '../evaluation';
 
 const modelConfig = globalModelConfigManager.getModelConfig('default');
+const modelRuntime = getModelRuntime(modelConfig);
 
 test.skipIf(!modelConfig.modelFamily)(
   'locate section',
@@ -14,17 +16,17 @@ test.skipIf(!modelConfig.modelFamily)(
   },
   async () => {
     const { context } = await getContextFromFixture('antd-tooltip');
-    const { rect, imageBase64 } = await AiLocateSection({
+    const { searchAreaConfig } = await AiLocateSection({
       context,
       sectionDescription: 'the version info on the top right corner',
-      modelConfig,
+      modelRuntime,
     });
-    expect(rect).toBeDefined();
-    expect(imageBase64).toBeDefined();
+    expect(searchAreaConfig?.sourceRect).toBeDefined();
+    expect(searchAreaConfig?.image.imageBase64).toBeDefined();
 
     const tmpFile = getTmpFile('jpg');
     await saveBase64Image({
-      base64Data: imageBase64!,
+      base64Data: searchAreaConfig!.image.imageBase64,
       outputPath: tmpFile!,
     });
   },

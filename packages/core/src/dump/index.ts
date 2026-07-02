@@ -13,3 +13,10 @@ export {
   generateImageScriptTag,
   generateDumpScriptTag,
 } from './html-utils';
+export { getTaskSearchArea, getTaskServiceDump } from './task-service-dump';
+export {
+  deriveTaskStatus,
+  deriveCaseStatus,
+  type TaskStatusFields,
+  type DerivedTaskStatus,
+} from './task-status';

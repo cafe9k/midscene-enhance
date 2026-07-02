@@ -1,9 +1,6 @@
 export { Agent, createAgent } from './agent';
 export { commonContextParser } from './utils';
-export {
-  getReportFileName,
-  printReportMsg,
-} from './utils';
+export { getReportFileName, printReportMsg } from './utils';
 export {
   extractInsightParam,
   locateParamStr,
@@ -16,6 +13,11 @@ export { type LocateCache, type PlanningCache, TaskCache } from './task-cache';
 export { cacheFileExt } from './task-cache';
 
 export { TaskExecutor } from './tasks';
+export type {
+  GherkinStepKeyword,
+  RunGherkinScenarioOptions,
+} from './run-gherkin-scenario';
 
 export type { AgentOpt } from '../types';
+export type { RecordToReportOptions, RecordToReportScreenshot } from '../types';
 export type { AiActOptions } from './agent';

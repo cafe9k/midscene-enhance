@@ -1,4 +1,4 @@
-import { isAutoGLM, isUITars } from '@/ai-model/auto-glm/util';
+import { type ModelRuntime, getModelRuntime } from '@/ai-model/models';
 import yaml from 'js-yaml';
 import type { TUserPrompt } from '../ai-model/index';
 import { ScreenshotItem } from '../screenshot-item';
@@ -10,10 +10,9 @@ import {
   type ActionParam,
   type ActionReturn,
   type AgentAssertOpt,
-  type AgentDescribeElementAtPointResult,
   type AgentOpt,
+  type AgentProgressListener,
   type AgentWaitForOpt,
-  type CacheConfig,
   type DeepThinkOption,
   type DeviceAction,
   ExecutionDump,
@@ -22,11 +21,10 @@ import {
   type ExecutionTaskLog,
   type LocateOption,
   type LocateResultElement,
-  type LocateValidatorResult,
-  type LocatorValidatorOption,
   type OnTaskStartTip,
   type PlanningAction,
-  type Rect,
+  type RecordToReportOptions,
+  type RecordToReportScreenshot,
   ReportActionDump,
   type ReportMeta,
   type ScrollParam,
@@ -50,20 +48,30 @@ import {
   parseYamlScript,
 } from '../yaml/index';
 
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import type { AbstractInterface } from '@/device';
 import type { TaskRunner } from '@/task-runner';
 import {
   type IModelConfig,
   MIDSCENE_REPLANNING_CYCLE_LIMIT,
   ModelConfigManager,
+  type TIntent,
   globalConfigManager,
   globalModelConfigManager,
 } from '@midscene/shared/env';
 import { getDebug } from '@midscene/shared/logger';
 import { assert, ifInBrowser, uuid } from '@midscene/shared/utils';
 import { defineActionSleep } from '../device';
+import { validateAgentCacheInput } from './cache-config';
+import { AgentProgressBus } from './progress';
+import { buildPromptWithContext } from './prompt-context';
+import { normalizeRecordToReportScreenshot } from './record-to-report';
+import {
+  type RunGherkinScenarioOptions,
+  runGherkinScenario,
+} from './run-gherkin-scenario';
+import { markdownToAiActPrompt } from './run-markdown';
 import { TaskCache } from './task-cache';
 import {
   TaskExecutionError,
@@ -71,70 +79,28 @@ import {
   locatePlanForLocate,
   withFileChooser,
 } from './tasks';
-import { locateParamStr, paramStr, taskTitleStr, typeStr } from './ui-utils';
-import { commonContextParser, getReportFileName, parsePrompt } from './utils';
+import {
+  type TaskTitleType,
+  locateParamStr,
+  paramStr,
+  taskTitleStr,
+  typeStr,
+} from './ui-utils';
+import {
+  commonContextParser,
+  getReportFileName,
+  normalizeFilePaths,
+  normalizeScrollType,
+  parsePrompt,
+} from './utils';
 
 const debug = getDebug('agent');
-
-const distanceOfTwoPoints = (p1: [number, number], p2: [number, number]) => {
-  const [x1, y1] = p1;
-  const [x2, y2] = p2;
-  return Math.round(Math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2));
-};
-
-const includedInRect = (point: [number, number], rect: Rect) => {
-  const [x, y] = point;
-  const { left, top, width, height } = rect;
-  return x >= left && x <= left + width && y >= top && y <= top + height;
-};
+const warn = getDebug('agent', { console: true });
 
 const defaultServiceExtractOption: ServiceExtractOption = {
   domIncluded: false,
   screenshotIncluded: true,
 };
-
-type CacheStrategy = NonNullable<CacheConfig['strategy']>;
-
-const CACHE_STRATEGIES: readonly CacheStrategy[] = [
-  'read-only',
-  'read-write',
-  'write-only',
-];
-
-const isValidCacheStrategy = (strategy: string): strategy is CacheStrategy =>
-  CACHE_STRATEGIES.some((value) => value === strategy);
-
-const CACHE_STRATEGY_VALUES = CACHE_STRATEGIES.map(
-  (value) => `"${value}"`,
-).join(', ');
-
-const legacyScrollTypeMap = {
-  once: 'singleAction',
-  untilBottom: 'scrollToBottom',
-  untilTop: 'scrollToTop',
-  untilRight: 'scrollToRight',
-  untilLeft: 'scrollToLeft',
-} as const;
-
-type LegacyScrollType = keyof typeof legacyScrollTypeMap;
-
-const normalizeScrollType = (
-  scrollType: ScrollParam['scrollType'] | LegacyScrollType | undefined,
-): ScrollParam['scrollType'] | undefined => {
-  if (!scrollType) {
-    return scrollType;
-  }
-
-  if (scrollType in legacyScrollTypeMap) {
-    return legacyScrollTypeMap[scrollType as LegacyScrollType];
-  }
-
-  return scrollType as ScrollParam['scrollType'];
-};
-
-const defaultReplanningCycleLimit = 20;
-const defaultVlmUiTarsReplanningCycleLimit = 40;
-const defaultAutoGlmReplanningCycleLimit = 100;
 
 export type AiActOptions = {
   cacheable?: boolean;
@@ -142,6 +108,14 @@ export type AiActOptions = {
   deepThink?: DeepThinkOption;
   deepLocate?: boolean;
   abortSignal?: AbortSignal;
+  context?: string;
+};
+
+type AiActInternalOptions = AiActOptions & {
+  _internalReportDisplay?: {
+    type?: TaskTitleType;
+    prompt?: string;
+  };
 };
 
 export class Agent<
@@ -174,6 +148,10 @@ export class Agent<
     (dump: string, executionDump?: ExecutionDump) => void
   > = [];
 
+  // Generic progress bus: every producer (aiAct today, more later) broadcasts
+  // through here. Consumers narrow by `event.scope`.
+  private readonly progressBus = new AgentProgressBus();
+
   get onDumpUpdate():
     | ((dump: string, executionDump?: ExecutionDump) => void)
     | undefined {
@@ -204,11 +182,6 @@ export class Agent<
     return this.opts.aiActContext ?? this.opts.aiActionContext;
   }
 
-  /**
-   * Flag to track if VL model warning has been shown
-   */
-  private hasWarnedNonVLModel = false;
-
   private executionDumpIndexByRunner = new WeakMap<TaskRunner, number>();
 
   private fullActionSpace: DeviceAction[];
@@ -221,11 +194,21 @@ export class Agent<
   }
 
   /**
-   * Ensures VL model warning is shown once when needed
+   * Fails fast for non-web interfaces when the model family is missing.
+   *
+   * Early Midscene web usage allowed running without `modelFamily` and falling
+   * back to a default bbox parser. Non-web users do not have that compatibility
+   * path, so this check helps surface configuration problems before spending a
+   * model call.
+   *
+   * Web flows validate missing locate model family at workflow boundaries:
+   * `Service.locate` throws when aiTap/aiType fallback to the default model for
+   * direct locate, and generic planning throws when aiAct asks a planning model
+   * to return inline locate coordinates. Those checks are intentionally placed
+   * where Midscene knows which model role should provide coordinate parsing.
    */
-  private ensureVLModelWarning() {
+  private assertModelFamilyForNonWebContext() {
     if (
-      !this.hasWarnedNonVLModel &&
       this.interface.interfaceType !== 'puppeteer' &&
       this.interface.interfaceType !== 'playwright' &&
       this.interface.interfaceType !== 'static' &&
@@ -233,31 +216,25 @@ export class Agent<
       this.interface.interfaceType !== 'page-over-chrome-extension-bridge'
     ) {
       this.modelConfigManager.throwErrorIfNonVLModel();
-      this.hasWarnedNonVLModel = true;
     }
   }
 
-  private resolveReplanningCycleLimit(
-    modelConfigForPlanning: IModelConfig,
-  ): number {
-    if (this.opts.replanningCycleLimit !== undefined) {
-      return this.opts.replanningCycleLimit;
-    }
+  private resolveReplanningCycleLimit(planningModel: ModelRuntime): number {
+    return (
+      this.opts.replanningCycleLimit ??
+      globalConfigManager.getEnvConfigValueAsNumber(
+        MIDSCENE_REPLANNING_CYCLE_LIMIT,
+      ) ??
+      planningModel.adapter.planning.defaultReplanningCycleLimit
+    );
+  }
 
-    return isUITars(modelConfigForPlanning.modelFamily)
-      ? defaultVlmUiTarsReplanningCycleLimit
-      : isAutoGLM(modelConfigForPlanning.modelFamily)
-        ? defaultAutoGlmReplanningCycleLimit
-        : defaultReplanningCycleLimit;
+  private resolveModelRuntime(intent: TIntent): ModelRuntime {
+    return getModelRuntime(this.modelConfigManager.getModelConfig(intent));
   }
 
   constructor(interfaceInstance: InterfaceType, opts?: AgentOpt) {
     this.interface = interfaceInstance;
-
-    const envReplanningCycleLimit =
-      globalConfigManager.getEnvConfigValueAsNumber(
-        MIDSCENE_REPLANNING_CYCLE_LIMIT,
-      );
 
     this.opts = Object.assign(
       {
@@ -268,11 +245,6 @@ export class Agent<
         groupDescription: '',
       },
       opts || {},
-      opts?.replanningCycleLimit === undefined &&
-        envReplanningCycleLimit !== undefined &&
-        !Number.isNaN(envReplanningCycleLimit)
-        ? { replanningCycleLimit: envReplanningCycleLimit }
-        : {},
     );
     assertReportGenerationOptions(this.opts);
 
@@ -314,6 +286,7 @@ export class Agent<
         {
           readOnly: cacheConfigObj.readOnly,
           writeOnly: cacheConfigObj.writeOnly,
+          cacheDir: cacheConfigObj.cacheDir,
         },
       );
     }
@@ -326,10 +299,10 @@ export class Agent<
       onTaskStart: this.callbackOnTaskStartTip.bind(this),
       replanningCycleLimit: this.opts.replanningCycleLimit,
       waitAfterAction: this.opts.waitAfterAction,
-      useDeviceTimestamp: this.opts.useDeviceTimestamp,
+      useDeviceTime: this.opts.useDeviceTime,
       actionSpace: this.fullActionSpace,
       hooks: {
-        onTaskUpdate: async (runner) => {
+        onSnapshotChange: async (runner) => {
           const executionDump = runner.dump();
           this.appendExecutionDump(executionDump, runner);
 
@@ -348,11 +321,12 @@ export class Agent<
             }
           }
         },
+        onProgress: this.progressBus.publish,
       },
     });
     this.dump = this.resetDump();
     this.reportFileName =
-      opts?.reportFileName ||
+      opts?.reportFileName ??
       // Keep deprecated testId behavior for generated report names until it is
       // fully removed from the public API.
       getReportFileName(opts?.testId || this.interface.interfaceType || 'web');
@@ -362,6 +336,8 @@ export class Agent<
       persistExecutionDump: this.opts.persistExecutionDump,
       outputFormat: this.opts.outputFormat,
       autoPrintReportMsg: this.opts.autoPrintReportMsg,
+      reuseExistingReport:
+        this.opts.reportAttributes?.['data-group-id'] === this.reportFileName,
     });
   }
 
@@ -382,8 +358,10 @@ export class Agent<
   }
 
   async getUIContext(action?: ServiceAction): Promise<UIContext> {
-    // Check VL model configuration when UI context is first needed
-    this.ensureVLModelWarning();
+    // Some non-web flows, such as Android, need an Agent instance before they
+    // can call device methods via ADB, so defer missing modelFamily errors
+    // until UI context is actually requested.
+    this.assertModelFamilyForNonWebContext();
 
     // If page context is frozen, return the frozen context for all actions
     if (this.frozenUIContext) {
@@ -391,15 +369,12 @@ export class Agent<
       return this.frozenUIContext;
     }
 
-    const { modelFamily } = this.modelConfigManager.getModelConfig('default');
-
     const maxRetries = Agent.CONTEXT_RETRY_MAX;
     for (let attempt = 0; ; attempt++) {
       try {
         return await commonContextParser(this.interface, {
           uploadServerUrl: this.modelConfigManager.getUploadTestServerUrl(),
           screenshotShrinkFactor: this.opts.screenshotShrinkFactor,
-          modelFamily,
         });
       } catch (error) {
         if (attempt < maxRetries && this.isRetryableContextError(error)) {
@@ -491,7 +466,11 @@ export class Agent<
     const exec = executionDump || this.lastExecutionDump;
     if (exec) {
       this.lastExecutionDump = exec;
-      this.reportGenerator.onExecutionUpdate(exec, this.getReportMeta());
+      this.reportGenerator.onExecutionUpdate(
+        exec,
+        this.getReportMeta(),
+        this.opts.reportAttributes,
+      );
     }
     this.reportFile = this.reportGenerator.getReportPath();
   }
@@ -546,16 +525,14 @@ export class Agent<
     );
 
     // assume all operation in action space is related to locating
-    const defaultIntentModelConfig =
-      this.modelConfigManager.getModelConfig('default');
-    const modelConfigForPlanning =
-      this.modelConfigManager.getModelConfig('planning');
+    const defaultModel = this.resolveModelRuntime('default');
+    const planningModel = this.resolveModelRuntime('planning');
 
     const { output } = await this.taskExecutor.runPlans(
       title,
       plans,
-      modelConfigForPlanning,
-      defaultIntentModelConfig,
+      planningModel,
+      defaultModel,
     );
     return output;
   }
@@ -563,7 +540,7 @@ export class Agent<
   async aiTap(
     locatePrompt: TUserPrompt,
     opt?: LocateOption & { fileChooserAccept?: string | string[] },
-  ) {
+  ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for tap');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
@@ -572,39 +549,45 @@ export class Agent<
       ? this.normalizeFileInput(opt.fileChooserAccept)
       : undefined;
 
-    return withFileChooser(this.interface, fileChooserAccept, async () => {
-      return this.callActionInActionSpace('Tap', {
+    await withFileChooser(this.interface, fileChooserAccept, async () => {
+      await this.callActionInActionSpace('Tap', {
         locate: detailedLocateParam,
       });
     });
   }
 
-  async aiRightClick(locatePrompt: TUserPrompt, opt?: LocateOption) {
+  async aiRightClick(
+    locatePrompt: TUserPrompt,
+    opt?: LocateOption,
+  ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for right click');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
 
-    return this.callActionInActionSpace('RightClick', {
+    await this.callActionInActionSpace('RightClick', {
       locate: detailedLocateParam,
     });
   }
 
-  async aiDoubleClick(locatePrompt: TUserPrompt, opt?: LocateOption) {
+  async aiDoubleClick(
+    locatePrompt: TUserPrompt,
+    opt?: LocateOption,
+  ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for double click');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
 
-    return this.callActionInActionSpace('DoubleClick', {
+    await this.callActionInActionSpace('DoubleClick', {
       locate: detailedLocateParam,
     });
   }
 
-  async aiHover(locatePrompt: TUserPrompt, opt?: LocateOption) {
+  async aiHover(locatePrompt: TUserPrompt, opt?: LocateOption): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for hover');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
 
-    return this.callActionInActionSpace('Hover', {
+    await this.callActionInActionSpace('Hover', {
       locate: detailedLocateParam,
     });
   }
@@ -615,7 +598,7 @@ export class Agent<
     opt: LocateOption & { value: string | number } & {
       autoDismissKeyboard?: boolean;
     } & { mode?: 'replace' | 'clear' | 'typeOnly' | 'append' },
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Legacy signature - deprecated
   /**
@@ -627,7 +610,7 @@ export class Agent<
     opt?: LocateOption & { autoDismissKeyboard?: boolean } & {
       mode?: 'replace' | 'clear' | 'typeOnly' | 'append';
     }, // AndroidDeviceInputOpt &
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Implementation
   async aiInput(
@@ -687,7 +670,7 @@ export class Agent<
     // backward compat: convert deprecated 'append' to 'typeOnly'
     const mode = opt?.mode === 'append' ? 'typeOnly' : opt?.mode;
 
-    return this.callActionInActionSpace('Input', {
+    await this.callActionInActionSpace('Input', {
       ...(opt || {}),
       value: stringValue,
       locate: detailedLocateParam,
@@ -699,7 +682,7 @@ export class Agent<
   async aiKeyboardPress(
     locatePrompt: TUserPrompt,
     opt: LocateOption & { keyName: string },
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Legacy signature - deprecated
   /**
@@ -709,7 +692,7 @@ export class Agent<
     keyName: string,
     locatePrompt?: TUserPrompt,
     opt?: LocateOption,
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Implementation
   async aiKeyboardPress(
@@ -751,7 +734,7 @@ export class Agent<
       ? buildDetailedLocateParam(locatePrompt, opt)
       : undefined;
 
-    return this.callActionInActionSpace('KeyboardPress', {
+    await this.callActionInActionSpace('KeyboardPress', {
       ...(opt || {}),
       locate: detailedLocateParam,
     });
@@ -761,7 +744,7 @@ export class Agent<
   async aiScroll(
     locatePrompt: TUserPrompt | undefined,
     opt: LocateOption & ScrollParam,
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Legacy signature - deprecated
   /**
@@ -771,7 +754,7 @@ export class Agent<
     scrollParam: ScrollParam,
     locatePrompt?: TUserPrompt,
     opt?: LocateOption,
-  ): Promise<any>;
+  ): Promise<void>;
 
   // Implementation
   async aiScroll(
@@ -816,10 +799,7 @@ export class Agent<
 
     if (opt) {
       const normalizedScrollType = normalizeScrollType(
-        (opt as ScrollParam).scrollType as
-          | ScrollParam['scrollType']
-          | LegacyScrollType
-          | undefined,
+        (opt as ScrollParam).scrollType,
       );
 
       if (normalizedScrollType !== (opt as ScrollParam).scrollType) {
@@ -835,7 +815,7 @@ export class Agent<
       opt,
     );
 
-    return this.callActionInActionSpace('Scroll', {
+    await this.callActionInActionSpace('Scroll', {
       ...(opt || {}),
       locate: detailedLocateParam,
     });
@@ -848,13 +828,13 @@ export class Agent<
       distance?: number;
       duration?: number;
     },
-  ) {
+  ): Promise<void> {
     const detailedLocateParam = buildDetailedLocateParam(
       locatePrompt || '',
       opt,
     );
 
-    return this.callActionInActionSpace('Pinch', {
+    await this.callActionInActionSpace('Pinch', {
       ...opt,
       locate: detailedLocateParam,
     });
@@ -863,31 +843,39 @@ export class Agent<
   async aiLongPress(
     locatePrompt: TUserPrompt,
     opt?: LocateOption & { duration?: number },
-  ) {
+  ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for long press');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
 
-    return this.callActionInActionSpace('LongPress', {
+    await this.callActionInActionSpace('LongPress', {
       ...(opt || {}),
       locate: detailedLocateParam,
     });
   }
 
-  async aiClearInput(locatePrompt: TUserPrompt, opt?: LocateOption) {
+  async aiClearInput(
+    locatePrompt: TUserPrompt,
+    opt?: LocateOption,
+  ): Promise<void> {
     assert(locatePrompt, 'missing locate prompt for clear input');
 
     const detailedLocateParam = buildDetailedLocateParam(locatePrompt, opt);
 
-    return this.callActionInActionSpace('ClearInput', {
+    await this.callActionInActionSpace('ClearInput', {
       locate: detailedLocateParam,
     });
   }
 
   async aiAct(
-    taskPrompt: string,
+    taskPrompt: TUserPrompt,
     opt?: AiActOptions,
   ): Promise<string | undefined> {
+    const internalReportDisplay = (opt as AiActInternalOptions | undefined)
+      ?._internalReportDisplay;
+    const taskPromptText =
+      typeof taskPrompt === 'string' ? taskPrompt : taskPrompt.prompt;
+    const reportPrompt = internalReportDisplay?.prompt || taskPromptText;
     const fileChooserAccept = opt?.fileChooserAccept
       ? this.normalizeFileInput(opt.fileChooserAccept)
       : undefined;
@@ -900,63 +888,84 @@ export class Agent<
     }
 
     const runAiAct = async () => {
-      const modelConfigForPlanning =
-        this.modelConfigManager.getModelConfig('planning');
-      const defaultIntentModelConfig =
-        this.modelConfigManager.getModelConfig('default');
-      const deepThink = opt?.deepThink === 'unset' ? undefined : opt?.deepThink;
+      const planningModel = this.resolveModelRuntime('planning');
+      const defaultModel = this.resolveModelRuntime('default');
+      const aiActContext =
+        opt?.context !== undefined ? opt.context : this.aiActContext;
+      const cachePrompt = buildPromptWithContext(taskPrompt, aiActContext);
+      // Controls the aiAct planning mode, such as sub-goal prompts and locate result strategy.
+      let deepThink = opt?.deepThink === true;
+      if (deepThink && planningModel.adapter.planning.kind === 'custom') {
+        warn(
+          `The "deepThink" option is not supported for aiAct with custom planning adapters (modelFamily: ${planningModel.config.modelFamily ?? 'unknown'}). It will be ignored.`,
+        );
+        deepThink = false;
+      }
 
-      const deepLocate = opt?.deepLocate;
+      let deepLocate = opt?.deepLocate;
+      if (
+        deepLocate &&
+        !planningModel.adapter.planning.supportsActionDeepLocate
+      ) {
+        warn(
+          `The "deepLocate" option is not supported for aiAct with the current planning adapter (modelFamily: ${planningModel.config.modelFamily ?? 'unknown'}). It will be ignored.`,
+        );
+        deepLocate = false;
+      }
 
-      const noIndividualLocateModel =
-        modelConfigForPlanning.modelName ===
-          defaultIntentModelConfig.modelName &&
-        modelConfigForPlanning.openaiBaseURL ===
-          defaultIntentModelConfig.openaiBaseURL;
+      const noIndividualLocateModel = planningModel.config.slot === 'default';
 
-      const includeBboxInPlanning = !deepThink && noIndividualLocateModel;
+      const includeLocateInPlanning = !deepThink && noIndividualLocateModel;
 
-      debug('setting includeBboxInPlanning to', includeBboxInPlanning, {
+      debug('setting includeLocateInPlanning to', includeLocateInPlanning, {
         deepThink,
         noIndividualLocateModel,
       });
 
       const cacheable = opt?.cacheable;
-      const replanningCycleLimit = this.resolveReplanningCycleLimit(
-        modelConfigForPlanning,
-      );
-      // if vlm-ui-tars or auto-glm, plan cache is not used
-      const isVlmUiTars = isUITars(modelConfigForPlanning.modelFamily);
-      const isAutoGlm = isAutoGLM(modelConfigForPlanning.modelFamily);
+      const replanningCycleLimit =
+        this.resolveReplanningCycleLimit(planningModel);
+      const planCacheEnabled = planningModel.adapter.planning.cacheEnabled;
       const matchedCache =
-        isVlmUiTars || isAutoGlm || cacheable === false
+        !planCacheEnabled || cacheable === false
           ? undefined
-          : this.taskCache?.matchPlanCache(taskPrompt);
+          : this.taskCache?.matchPlanCache(cachePrompt);
+      let cachedYamlFailed = false;
       if (
         matchedCache?.cacheUsable &&
         this.taskCache?.isCacheResultUsed &&
         matchedCache.cacheContent?.yamlWorkflow?.trim()
       ) {
-        // log into report file
-        await this.taskExecutor.loadYamlFlowAsPlanning(
-          taskPrompt,
-          matchedCache.cacheContent.yamlWorkflow,
-        );
-
-        debug('matched cache, will call .runYaml to run the action');
         const yaml = matchedCache.cacheContent.yamlWorkflow;
-        await this.runYaml(yaml);
-        return;
+        try {
+          // log into report file
+          await this.taskExecutor.loadYamlFlowAsPlanning(
+            taskPrompt,
+            yaml,
+            internalReportDisplay,
+          );
+
+          debug('matched cache, will call .runYaml to run the action');
+          await this.runYaml(yaml);
+          return;
+        } catch (error) {
+          cachedYamlFailed = true;
+          warn(
+            `cached aiAct plan failed, will replan and disable the stale cache: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       // If cache matched but is not executable, fall through to normal execution
       const imagesIncludeCount: number = deepThink ? 2 : 1;
       const { output: actionOutput } = await this.taskExecutor.action(
         taskPrompt,
-        modelConfigForPlanning,
-        defaultIntentModelConfig,
-        includeBboxInPlanning,
-        this.aiActContext,
+        planningModel,
+        defaultModel,
+        includeLocateInPlanning,
+        aiActContext,
         cacheable,
         replanningCycleLimit,
         imagesIncludeCount,
@@ -964,19 +973,23 @@ export class Agent<
         fileChooserAccept,
         deepLocate,
         abortSignal,
+        internalReportDisplay,
       );
 
       // update cache
-      if (
-        this.taskCache &&
-        actionOutput?.yamlFlow?.length &&
-        cacheable !== false
-      ) {
+      if (this.taskCache && cacheable !== false) {
+        const yamlFlow = cachedYamlFailed ? [] : actionOutput?.yamlFlow;
+
+        if (!cachedYamlFailed && !yamlFlow?.length) {
+          return actionOutput?.output;
+        }
+
+        const yamlFlowToCache = yamlFlow ?? [];
         const yamlContent: MidsceneYamlScript = {
           tasks: [
             {
-              name: taskPrompt,
-              flow: actionOutput.yamlFlow,
+              name: reportPrompt,
+              flow: yamlFlowToCache,
             },
           ],
         };
@@ -984,7 +997,7 @@ export class Agent<
         this.taskCache.updateOrAppendCacheRecord(
           {
             type: 'plan',
-            prompt: taskPrompt,
+            prompt: cachePrompt,
             yamlWorkflow: yamlFlowStr,
           },
           matchedCache,
@@ -997,10 +1010,32 @@ export class Agent<
     return await runAiAct();
   }
 
+  async runMarkdown(
+    markdownPath: string,
+    opt?: AiActOptions,
+  ): Promise<string | undefined> {
+    const markdown = await readFile(markdownPath, 'utf-8');
+    const { prompt } = await markdownToAiActPrompt(markdown, markdownPath);
+    return this.aiAct(prompt, {
+      ...opt,
+      _internalReportDisplay: {
+        type: 'Markdown',
+        prompt: basename(markdownPath),
+      },
+    } as AiActOptions);
+  }
+
+  async runGherkinScenario(
+    scenarioText: string,
+    opt?: RunGherkinScenarioOptions,
+  ): Promise<void> {
+    return runGherkinScenario(this, scenarioText, opt);
+  }
+
   /**
    * @deprecated Use {@link Agent.aiAct} instead.
    */
-  async aiAction(taskPrompt: string, opt?: AiActOptions) {
+  async aiAction(taskPrompt: TUserPrompt, opt?: AiActOptions) {
     return this.aiAct(taskPrompt, opt);
   }
 
@@ -1008,11 +1043,11 @@ export class Agent<
     demand: ServiceExtractParam,
     opt: ServiceExtractOption = defaultServiceExtractOption,
   ): Promise<ReturnType> {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
     const { output } = await this.taskExecutor.createTypeQueryExecution(
       'Query',
       demand,
-      modelConfig,
+      modelRuntime,
       opt,
     );
     return output as ReturnType;
@@ -1022,13 +1057,13 @@ export class Agent<
     prompt: TUserPrompt,
     opt: ServiceExtractOption = defaultServiceExtractOption,
   ): Promise<boolean> {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
 
     const { textPrompt, multimodalPrompt } = parsePrompt(prompt);
     const { output } = await this.taskExecutor.createTypeQueryExecution(
       'Boolean',
       textPrompt,
-      modelConfig,
+      modelRuntime,
       opt,
       multimodalPrompt,
     );
@@ -1039,13 +1074,13 @@ export class Agent<
     prompt: TUserPrompt,
     opt: ServiceExtractOption = defaultServiceExtractOption,
   ): Promise<number> {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
 
     const { textPrompt, multimodalPrompt } = parsePrompt(prompt);
     const { output } = await this.taskExecutor.createTypeQueryExecution(
       'Number',
       textPrompt,
-      modelConfig,
+      modelRuntime,
       opt,
       multimodalPrompt,
     );
@@ -1056,13 +1091,13 @@ export class Agent<
     prompt: TUserPrompt,
     opt: ServiceExtractOption = defaultServiceExtractOption,
   ): Promise<string> {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
 
     const { textPrompt, multimodalPrompt } = parsePrompt(prompt);
     const { output } = await this.taskExecutor.createTypeQueryExecution(
       'String',
       textPrompt,
-      modelConfig,
+      modelRuntime,
       opt,
       multimodalPrompt,
     );
@@ -1074,98 +1109,6 @@ export class Agent<
     opt: ServiceExtractOption = defaultServiceExtractOption,
   ): Promise<string> {
     return this.aiString(prompt, opt);
-  }
-
-  async describeElementAtPoint(
-    center: [number, number],
-    opt?: {
-      verifyPrompt?: boolean;
-      retryLimit?: number;
-      deepLocate?: boolean;
-    } & LocatorValidatorOption,
-  ): Promise<AgentDescribeElementAtPointResult> {
-    const { verifyPrompt = true, retryLimit = 3 } = opt || {};
-
-    let success = false;
-    let retryCount = 0;
-    let resultPrompt = '';
-    let deepLocate = opt?.deepLocate || false;
-    let verifyResult: LocateValidatorResult | undefined;
-
-    while (!success && retryCount < retryLimit) {
-      if (retryCount >= 2) {
-        deepLocate = true;
-      }
-      debug(
-        'aiDescribe',
-        center,
-        'verifyPrompt',
-        verifyPrompt,
-        'retryCount',
-        retryCount,
-        'deepLocate',
-        deepLocate,
-      );
-      // use same intent as aiLocate
-      const modelConfig = this.modelConfigManager.getModelConfig('insight');
-
-      const text = await this.service.describe(center, modelConfig, {
-        deepLocate,
-      });
-      debug('aiDescribe text', text);
-      assert(text.description, `failed to describe element at [${center}]`);
-      resultPrompt = text.description;
-
-      // Don't pass deepLocate to verification locate — the description was generated
-      // from a cropped view (deepLocate describe), but verification should use regular
-      // locate on the full screenshot to confirm the description works universally.
-      // Passing deepLocate here would trigger AiLocateSection with an element-level
-      // description as a section prompt, which is semantically incorrect.
-      verifyResult = await this.verifyLocator(
-        resultPrompt,
-        undefined,
-        center,
-        opt,
-      );
-      if (verifyResult.pass) {
-        success = true;
-      } else {
-        retryCount++;
-      }
-    }
-
-    return {
-      prompt: resultPrompt,
-      deepLocate,
-      verifyResult,
-    };
-  }
-
-  async verifyLocator(
-    prompt: string,
-    locateOpt: LocateOption | undefined,
-    expectCenter: [number, number],
-    verifyLocateOption?: LocatorValidatorOption,
-  ): Promise<LocateValidatorResult> {
-    debug('verifyLocator', prompt, locateOpt, expectCenter, verifyLocateOption);
-
-    const { center: verifyCenter, rect: verifyRect } = await this.aiLocate(
-      prompt,
-      locateOpt,
-    );
-    const distance = distanceOfTwoPoints(expectCenter, verifyCenter);
-    const included = includedInRect(expectCenter, verifyRect);
-    const pass =
-      distance <= (verifyLocateOption?.centerDistanceThreshold || 20) ||
-      included;
-    const verifyResult = {
-      pass,
-      rect: verifyRect,
-      center: verifyCenter,
-      centerDistance: distance,
-    };
-    debug('aiDescribe verifyResult', verifyResult);
-    return verifyResult;
   }
 
   /**
@@ -1185,16 +1128,15 @@ export class Agent<
     assert(locateParam, 'cannot get locate param for aiLocate');
     const locatePlan = locatePlanForLocate(locateParam);
     const plans = [locatePlan];
-    const defaultIntentModelConfig =
-      this.modelConfigManager.getModelConfig('default');
-    const modelConfigForPlanning =
-      this.modelConfigManager.getModelConfig('planning');
+    const defaultModel = this.resolveModelRuntime('default');
+    const planningModel = this.resolveModelRuntime('planning');
 
     const { output } = await this.taskExecutor.runPlans(
       taskTitleStr('Locate', locateParamStr(locateParam)),
       plans,
-      modelConfigForPlanning,
-      defaultIntentModelConfig,
+      planningModel,
+      defaultModel,
+      opt?.uiContext ? { uiContext: opt.uiContext } : undefined,
     );
 
     const { element } = output;
@@ -1211,7 +1153,7 @@ export class Agent<
     msg?: string,
     opt?: AgentAssertOpt & ServiceExtractOption,
   ) {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
 
     const serviceOpt: ServiceExtractOption = {
       domIncluded: opt?.domIncluded ?? defaultServiceExtractOption.domIncluded,
@@ -1220,7 +1162,11 @@ export class Agent<
         defaultServiceExtractOption.screenshotIncluded,
     };
 
-    const { textPrompt, multimodalPrompt } = parsePrompt(assertion);
+    const assertionWithContext = buildPromptWithContext(
+      assertion,
+      opt?.context,
+    );
+    const { textPrompt, multimodalPrompt } = parsePrompt(assertionWithContext);
     const assertionText =
       typeof assertion === 'string' ? assertion : assertion.prompt;
 
@@ -1229,9 +1175,12 @@ export class Agent<
         await this.taskExecutor.createTypeQueryExecution<boolean>(
           'Assert',
           textPrompt,
-          modelConfig,
+          modelRuntime,
           serviceOpt,
           multimodalPrompt,
+          {
+            abortSignal: opt?.abortSignal,
+          },
         );
 
       const pass = Boolean(output);
@@ -1283,7 +1232,7 @@ export class Agent<
   }
 
   async aiWaitFor(assertion: TUserPrompt, opt?: AgentWaitForOpt) {
-    const modelConfig = this.modelConfigManager.getModelConfig('insight');
+    const modelRuntime = this.resolveModelRuntime('insight');
     await this.taskExecutor.waitFor(
       assertion,
       {
@@ -1291,7 +1240,7 @@ export class Agent<
         timeoutMs: opt?.timeoutMs || 15 * 1000,
         checkIntervalMs: opt?.checkIntervalMs || 3 * 1000,
       },
-      modelConfig,
+      modelRuntime,
     );
   }
 
@@ -1367,10 +1316,54 @@ export class Agent<
     this.dumpUpdateListeners = [];
   }
 
+  /**
+   * Subscribe to the generic agent progress bus. The listener receives every
+   * progress event regardless of producer; narrow by `event.scope` to handle a
+   * specific producer (e.g. `'aiAct'`).
+   * @param listener Listener function
+   * @returns A remove function that can be called to remove this listener
+   */
+  addProgressListener(listener: AgentProgressListener): () => void {
+    return this.progressBus.subscribe(listener);
+  }
+
+  /**
+   * Remove a progress listener added via {@link addProgressListener}.
+   */
+  removeProgressListener(listener: AgentProgressListener): void {
+    this.progressBus.unsubscribe(listener);
+  }
+
+  /**
+   * Clear all generic progress listeners.
+   */
+  clearProgressListeners(): void {
+    this.progressBus.clear();
+  }
+
+  private notifyDumpUpdateListeners(executionDump?: ExecutionDump) {
+    const dumpString = this.dumpDataString();
+    for (const listener of this.dumpUpdateListeners) {
+      try {
+        listener(dumpString, executionDump);
+      } catch (error) {
+        console.error('Error in onDumpUpdate listener', error);
+      }
+    }
+  }
+
   async destroy() {
     // Early return if already destroyed
     if (this.destroyed) {
       return;
+    }
+
+    this.destroyed = true;
+    let interfaceDestroyError: unknown;
+    try {
+      await this.interface.destroy?.();
+    } catch (error) {
+      interfaceDestroyError = error;
     }
 
     // Wait for all queued write operations to complete
@@ -1379,30 +1372,63 @@ export class Agent<
     const finalPath = await this.reportGenerator.finalize();
     this.reportFile = finalPath;
 
-    await this.interface.destroy?.();
     this.resetDump(); // reset dump to release memory
-    this.destroyed = true;
+
+    if (interfaceDestroyError) {
+      throw interfaceDestroyError;
+    }
   }
 
-  async recordToReport(
-    title?: string,
-    opt?: {
-      content: string;
-    },
-  ) {
-    // 1. screenshot
-    const base64 = await this.interface.screenshotBase64();
+  async recordToReport(title?: string, opt?: RecordToReportOptions) {
     const now = Date.now();
-    const screenshot = ScreenshotItem.create(base64, now);
-    // 2. build recorder
-    const recorder: ExecutionRecorderItem[] = [
-      {
-        type: 'screenshot',
-        ts: now,
-        screenshot,
+    const screenshots = opt?.screenshots;
+    const screenshotBase64 = opt?.screenshotBase64;
+    const hasScreenshots = screenshots !== undefined;
+    const hasScreenshotBase64 = screenshotBase64 !== undefined;
+    if (hasScreenshots && !Array.isArray(screenshots)) {
+      throw new Error('recordToReport: screenshots must be an array');
+    }
+    if (hasScreenshotBase64 && typeof screenshotBase64 !== 'string') {
+      throw new Error('recordToReport: screenshotBase64 must be a string');
+    }
+    if (hasScreenshots && hasScreenshotBase64) {
+      throw new Error(
+        'recordToReport: provide only one of screenshots or screenshotBase64',
+      );
+    }
+    if (opt && 'subType' in opt) {
+      throw new Error('recordToReport: subType is not supported');
+    }
+    const customScreenshots = hasScreenshots ? screenshots : undefined;
+    if (customScreenshots && customScreenshots.length === 0) {
+      throw new Error('recordToReport: screenshots cannot be empty');
+    }
+    const screenshotInputs: RecordToReportScreenshot[] =
+      customScreenshots ??
+      (hasScreenshotBase64
+        ? [{ base64: screenshotBase64 }]
+        : [{ base64: await this.interface.screenshotBase64() }]);
+
+    // 1. build recorder
+    const recorder: ExecutionRecorderItem[] = screenshotInputs.map(
+      (screenshotInput, index) => {
+        const normalizedScreenshotInput = normalizeRecordToReportScreenshot(
+          screenshotInput,
+          index,
+        );
+        const ts = now + index;
+        return {
+          type: 'screenshot',
+          ts,
+          screenshot: ScreenshotItem.create(
+            normalizedScreenshotInput.base64,
+            ts,
+          ),
+          description: normalizedScreenshotInput.description,
+        };
       },
-    ];
-    // 3. build ExecutionTaskLog
+    );
+    // 2. build ExecutionTaskLog
     const task: ExecutionTaskLog = {
       taskId: uuid(),
       type: 'Log',
@@ -1419,7 +1445,7 @@ export class Agent<
       },
       executor: async () => {},
     };
-    // 4. build ExecutionDump
+    // 3. build ExecutionDump
     const executionDump = new ExecutionDump({
       id: uuid(),
       logTime: now,
@@ -1427,21 +1453,68 @@ export class Agent<
       description: opt?.content || '',
       tasks: [task],
     });
-    // 5. append to execution dump
+    // 4. append to execution dump
     this.appendExecutionDump(executionDump);
 
     this.writeOutActionDumps(executionDump);
     await this.reportGenerator.flush();
 
     // Call all registered dump update listeners
-    const dumpString = this.dumpDataString();
-    for (const listener of this.dumpUpdateListeners) {
-      try {
-        listener(dumpString);
-      } catch (error) {
-        console.error('Error in onDumpUpdate listener', error);
-      }
+    this.notifyDumpUpdateListeners(executionDump);
+  }
+
+  async recordErrorToReport(
+    title: string,
+    opt: {
+      error: Error;
+      content?: string;
+      screenshotBase64?: string;
+    },
+  ) {
+    const now = Date.now();
+    const recorder: ExecutionRecorderItem[] = [];
+    const base64 =
+      opt.screenshotBase64 ?? (await this.interface.screenshotBase64());
+    if (base64) {
+      recorder.push({
+        type: 'screenshot',
+        ts: now,
+        screenshot: ScreenshotItem.create(base64, now),
+      });
     }
+
+    const task: ExecutionTaskLog = {
+      taskId: uuid(),
+      type: 'Log',
+      subType: 'Error',
+      status: 'failed',
+      recorder,
+      timing: {
+        start: now,
+        end: now,
+        cost: 0,
+      },
+      param: {
+        content: opt.content || '',
+      },
+      error: opt.error,
+      errorMessage: opt.error.message,
+      errorStack: opt.error.stack,
+      executor: async () => {},
+    };
+
+    const executionDump = new ExecutionDump({
+      id: uuid(),
+      logTime: now,
+      name: title,
+      description: opt.content || opt.error.message,
+      tasks: [task],
+    });
+
+    this.appendExecutionDump(executionDump);
+    this.writeOutActionDumps(executionDump);
+    await this.reportGenerator.flush();
+    this.notifyDumpUpdateListeners(executionDump);
   }
 
   /**
@@ -1495,28 +1568,9 @@ export class Agent<
     enabled: boolean;
     readOnly: boolean;
     writeOnly: boolean;
+    cacheDir?: string;
   } | null {
-    // Validate original cache config before processing
-    // Agent requires explicit IDs - don't allow auto-generation
-    if (opts.cache === true) {
-      throw new Error(
-        'cache: true requires an explicit cache ID. Please provide:\n' +
-          'Example: cache: { id: "my-cache-id" }',
-      );
-    }
-
-    // Check if cache config object is missing ID
-    if (
-      opts.cache &&
-      typeof opts.cache === 'object' &&
-      opts.cache !== null &&
-      !opts.cache.id
-    ) {
-      throw new Error(
-        'cache configuration requires an explicit id.\n' +
-          'Example: cache: { id: "my-cache-id" }',
-      );
-    }
+    validateAgentCacheInput(opts.cache);
 
     // Use the unified utils function to process cache configuration
     const cacheConfig = processCacheConfig(
@@ -1531,25 +1585,7 @@ export class Agent<
     // Handle cache configuration object
     if (typeof cacheConfig === 'object' && cacheConfig !== null) {
       const id = cacheConfig.id;
-      const rawStrategy = cacheConfig.strategy as unknown;
-      let strategyValue: string;
-
-      if (rawStrategy === undefined) {
-        strategyValue = 'read-write';
-      } else if (typeof rawStrategy === 'string') {
-        strategyValue = rawStrategy;
-      } else {
-        throw new Error(
-          `cache.strategy must be a string when provided, but received type ${typeof rawStrategy}`,
-        );
-      }
-
-      if (!isValidCacheStrategy(strategyValue)) {
-        throw new Error(
-          `cache.strategy must be one of ${CACHE_STRATEGY_VALUES}, but received "${strategyValue}"`,
-        );
-      }
-
+      const strategyValue = cacheConfig.strategy ?? 'read-write';
       const isReadOnly = strategyValue === 'read-only';
       const isWriteOnly = strategyValue === 'write-only';
 
@@ -1558,31 +1594,16 @@ export class Agent<
         enabled: !isWriteOnly,
         readOnly: isReadOnly,
         writeOnly: isWriteOnly,
+        cacheDir: cacheConfig.cacheDir?.trim(),
       };
     }
 
     return null;
   }
 
-  private normalizeFilePaths(files: string[]): string[] {
-    if (ifInBrowser) {
-      throw new Error('File chooser is not supported in browser environment');
-    }
-
-    return files.map((file) => {
-      const absolutePath = resolve(file);
-      if (!existsSync(absolutePath)) {
-        throw new Error(
-          `File not found: ${file}. Resolved to: ${absolutePath}. Current working directory: ${process.cwd()}`,
-        );
-      }
-      return absolutePath;
-    });
-  }
-
   private normalizeFileInput(files: string | string[]): string[] {
     const filesArray = Array.isArray(files) ? files : [files];
-    return this.normalizeFilePaths(filesArray);
+    return normalizeFilePaths(filesArray);
   }
 
   /**

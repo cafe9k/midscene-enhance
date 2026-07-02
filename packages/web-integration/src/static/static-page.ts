@@ -1,17 +1,15 @@
-import type { DeviceAction, Point, UIContext } from '@midscene/core';
+import type {
+  DeviceAction,
+  Point,
+  ScreenshotRef,
+  UIContext,
+} from '@midscene/core';
 import type { AbstractInterface } from '@midscene/core/device';
 import {
-  defineActionDragAndDrop,
-  defineActionHover,
-  defineActionInput,
-  defineActionKeyboardPress,
-  defineActionRightClick,
-  defineActionScroll,
-  defineActionSwipe,
-  defineActionTap,
+  type InputPrimitives,
+  defineActionsFromInputPrimitives,
 } from '@midscene/core/device';
 import { ERROR_CODE_NOT_IMPLEMENTED_AS_DESIGNED } from '@midscene/shared/common';
-
 
 const ThrowNotImplemented = (methodName: string) => {
   throw new Error(
@@ -19,12 +17,62 @@ const ThrowNotImplemented = (methodName: string) => {
   );
 };
 
-type StaticPageUIContext = Omit<UIContext, 'deprecatedDpr'>;
+type SerializedStaticScreenshot = {
+  base64?: unknown;
+  _base64?: unknown;
+  type?: unknown;
+} & Partial<Omit<ScreenshotRef, 'type'>>;
+
+type StaticPageUIContext = Omit<
+  UIContext,
+  'deprecatedDpr' | 'screenshot'
+> & {
+  screenshot: UIContext['screenshot'] | SerializedStaticScreenshot;
+};
+
+function screenshotBase64FromContext(
+  screenshot: StaticPageUIContext['screenshot'],
+): string {
+  const record = screenshot as SerializedStaticScreenshot;
+  const base64 = record.base64 ?? record._base64;
+  if (typeof base64 === 'string') {
+    return base64;
+  }
+
+  if (record.type === 'midscene_screenshot_ref') {
+    throw new Error(
+      'StaticPage screenshot is a serialized reference without base64 data',
+    );
+  }
+
+  throw new Error(
+    'StaticPage screenshot must include base64 data before execution',
+  );
+}
 
 export default class StaticPage implements AbstractInterface {
   interfaceType = 'static';
 
   private uiContext: StaticPageUIContext;
+  readonly inputPrimitives: InputPrimitives = {
+    pointer: {
+      tap: async () => ThrowNotImplemented('Tap'),
+      rightClick: async () => ThrowNotImplemented('RightClick'),
+      hover: async () => ThrowNotImplemented('Hover'),
+      dragAndDrop: async () => ThrowNotImplemented('DragAndDrop'),
+    },
+    keyboard: {
+      typeText: async () => ThrowNotImplemented('Input'),
+      keyboardPress: async () => ThrowNotImplemented('KeyboardPress'),
+      clearInput: async () => ThrowNotImplemented('ClearInput'),
+    },
+    touch: {
+      swipe: async () => ThrowNotImplemented('Swipe'),
+    },
+    scroll: {
+      scroll: async () => ThrowNotImplemented('Scroll'),
+    },
+  };
 
   constructor(uiContext: StaticPageUIContext) {
     this.uiContext = uiContext;
@@ -33,32 +81,9 @@ export default class StaticPage implements AbstractInterface {
   actionSpace(): DeviceAction[] {
     // Return available actions for static page - they will throw "not implemented" errors when executed
     // but need to be available for planning phase
-    return [
-      defineActionTap(async (param) => {
-        ThrowNotImplemented('Tap');
-      }),
-      defineActionRightClick(async (param) => {
-        ThrowNotImplemented('RightClick');
-      }),
-      defineActionHover(async (param) => {
-        ThrowNotImplemented('Hover');
-      }),
-      defineActionInput(async (param) => {
-        ThrowNotImplemented('Input');
-      }),
-      defineActionKeyboardPress(async (param) => {
-        ThrowNotImplemented('KeyboardPress');
-      }),
-      defineActionScroll(async (param) => {
-        ThrowNotImplemented('Scroll');
-      }),
-      defineActionDragAndDrop(async (param) => {
-        ThrowNotImplemented('DragAndDrop');
-      }),
-      defineActionSwipe(async (param) => {
-        ThrowNotImplemented('Swipe');
-      }),
-    ];
+    return defineActionsFromInputPrimitives(this.inputPrimitives, {
+      size: () => this.size(),
+    });
   }
 
   async evaluateJavaScript<T = unknown>(script: string): Promise<T> {
@@ -84,16 +109,12 @@ export default class StaticPage implements AbstractInterface {
 
   async size() {
     return {
-      ...this.uiContext.shotSize
+      ...this.uiContext.shotSize,
     };
   }
 
   async screenshotBase64() {
-    const screenshot = this.uiContext.screenshot;
-    if (typeof screenshot === 'object' && 'base64' in screenshot) {
-      return (screenshot as { base64: string }).base64;
-    }
-    return screenshot as unknown as string;
+    return screenshotBase64FromContext(this.uiContext.screenshot);
   }
 
   async url() {

@@ -23,7 +23,12 @@ Midscene 针对每个不同环境都有对应的 Agent。每个 Agent 的构造�
   - `single-html`（默认）：按文件名处理。Midscene 会在 `midscene_run/report/` 下写入 `<reportFileName>.html`（如果已带 `.html` 后缀则保持不变）。
   - `html-and-external-assets`：按目录名处理。Midscene 会在 `midscene_run/report/<reportFileName>/` 下写入 `index.html` 与相关静态资源。
 - `autoPrintReportMsg: boolean`: 如果为 true，则打印报告消息。默认值为 true。
-- `cacheId: string | undefined`: 如果配置，则使用此 cacheId 保存或匹配缓存。默认值为 undefined，也就是不启用缓存。
+- `cache?: false | { id: string; strategy?: 'read-only' | 'read-write' | 'write-only'; dir?: string }`：
+  - `false`：完全禁用缓存。
+  - `id`：必填的缓存 ID。
+  - `strategy`：可选缓存策略。默认值为 `'read-write'`。
+  - `dir`：可选缓存目录路径。配置后，缓存文件会写入该目录，而不是 `<MIDSCENE_RUN_DIR>/cache`。相对路径会基于当前工作目录解析，而不是基于 `MIDSCENE_RUN_DIR`。这样可以把 cache 与 logs/report 目录拆开。
+- `cacheId: string | undefined`（已废弃）：仅用于向后兼容。推荐使用 `cache.id`。
 - `aiActContext: string`: 调用 `agent.aiAct()` 时，发送给 AI 模型的背景知识，比如 "有 cookie 对话框时先关闭它"，默认值为空。此前名为 `aiActionContext`，旧名称仍然兼容。
 - `replanningCycleLimit: number`: `aiAct` 的最大重规划次数。默认值为 20（UI-TARS 模型默认 40）。推荐通过 agent 入参设置；`MIDSCENE_REPLANNING_CYCLE_LIMIT` 环境变量仅作兼容读取。
 - `waitAfterAction: number`: 每次动作执行后的等待时间（毫秒）。这让 UI 有时间稳定，然后再执行下一个动作。默认值为 300 毫秒。
@@ -36,6 +41,8 @@ Midscene 针对每个不同环境都有对应的 Agent。每个 Agent 的构造�
   - 对于移动端设备，将 `screenshotShrinkFactor` 设置为 2 可以在保持清晰度的同时减少 token 的消耗，但不建议设置的值超过 3，否则可能会导致图像过于模糊，影响 AI 模型的理解。
   - 对于 Web 页面，如果页面内容比较复杂或包含大量细节，不建议设置 `screenshotShrinkFactor`，以避免截图过于模糊。此外，如果为了让 Web 页面截图有更高的清晰度，可以配置 Puppeteer 或 Playwright 的 `deviceScaleFactor` 为 2，这可以让 Puppeteer 或 Playwright 按照高清屏的方式来渲染页面。
 
+设备 CLI 可以按单次调用传入这些 Agent 行为参数。把 API 的 camelCase 参数名转换成不带平台前缀的 kebab-case flag，例如 `waitAfterAction` -> `--wait-after-action`。各平台 CLI 入口请参考 [Skills](./skills)。
+
 ### 自定义模型
 
 `modelConfig: Record<string, string | number>` 可选。它允许你通过代码配置模型，而不是通过环境变量。
@@ -47,10 +54,10 @@ Midscene 针对每个不同环境都有对应的 Agent。每个 Agent 的构造�
 ```typescript
 const agent = new PuppeteerAgent(page, {
   modelConfig: {
-    MIDSCENE_MODEL_NAME: 'qwen3-vl-plus',
+    MIDSCENE_MODEL_NAME: 'qwen3.7-plus',
     MIDSCENE_MODEL_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     MIDSCENE_MODEL_API_KEY: 'sk-...',
-    MIDSCENE_MODEL_FAMILY: 'qwen3-vl'
+    MIDSCENE_MODEL_FAMILY: 'qwen3'
   }
 });
 ```
@@ -60,10 +67,10 @@ const agent = new PuppeteerAgent(page, {
 const agent = new PuppeteerAgent(page, {
   modelConfig: {
     // 默认
-    MIDSCENE_MODEL_NAME: 'qwen3-vl-plus',
+    MIDSCENE_MODEL_NAME: 'qwen3.7-plus',
     MIDSCENE_MODEL_API_KEY: 'sk-default-key',
     MIDSCENE_MODEL_BASE_URL: '.....',
-    MIDSCENE_MODEL_FAMILY: 'qwen3-vl',
+    MIDSCENE_MODEL_FAMILY: 'qwen3',
 
     // planning 意图
     MIDSCENE_PLANNING_MODEL_NAME: 'gpt-5.1',
@@ -150,8 +157,8 @@ function aiAct(
     fileChooserAccept?: string | string[];
     abortSignal?: AbortSignal;
   },
-): Promise<void>;
-function ai(prompt: string): Promise<void>; // 简写形式
+): Promise<string | undefined>;
+function ai(prompt: string): Promise<string | undefined>; // 简写形式
 ```
 
 - 参数：
@@ -159,11 +166,12 @@ function ai(prompt: string): Promise<void>; // 简写形式
   - `prompt: string` - 用自然语言描述的操作内容
   - `options?: Object` - 可选，一个配置对象，包含：
     - `cacheable?: boolean` - 当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 true
-    - `deepThink?: 'unset' | true | false` - 当模型支持时（取决于 MIDSCENE_MODEL_FAMILY），是否开启规划阶段的深度思考能力。默认值为 `'unset'`（等同于省略该参数），跟随模型服务商的默认策略。当显式设置为 `true` 或 `false` 时，会覆盖环境变量 `MIDSCENE_MODEL_REASONING_ENABLED` 的配置。[详情参阅 deepThink 说明](./model-strategy#关于-aiact-方法的-deepthink-参数)。
+    - `deepThink?: 'unset' | true | false` - 控制 Midscene 在 `aiAct` 执行规划时的具体实现。开启后，`aiAct` 会更注重任务拆解，并将任务 Planning 和 UI 元素定位拆解为不同的模型调用。为了兼容旧写法，`'unset'` 仍然可以传入，并会被按 `false` 处理。[详情参阅 deepThink 说明](./model-strategy#关于-aiact-方法的-deepthink-参数)。
     - `deepLocate?: boolean` - 是否开启[深度定位](#深度定位deeplocate)。默认值为 false。
-    - `fileChooserAccept?: string | string[]` - 当文件选择器弹出时，指定对应的文件路径。可以是单个文件路径或路径数组。仅在 web 页面（Playwright、Puppeteer）中可用。
+    - `fileChooserAccept?: string | string[]` - 当文件选择器弹出时，指定对应的文件路径。可以是单个文件路径或路径数组。仅在 web 页面（Playwright、Puppeteer 或 Chrome extension Bridge mode）中可用。
       - **注意**：如果文件输入框不支持多文件（没有 `multiple` 属性），但是传入了多个文件，会抛出错误。
       - **注意**：如果点击触发了文件选择器但没有传入 `fileChooserAccept` 参数，文件选择器会被忽略，页面可以继续正常操作。
+      - **注意**：Chrome extension Bridge mode 不支持目录上传输入框（`webkitdirectory` / `directory`）。如需上传目录，请使用 Playwright。
     - `abortSignal?: AbortSignal` - 可选的 [AbortSignal](https://developer.mozilla.org/zh-CN/docs/Web/API/AbortSignal)，用于中止 `aiAct` 的执行。当信号被触发时，Midscene 会停止当前的规划循环并抛出错误。适用于实现超时控制或用户主动取消操作的场景。
 
 - 返回值：
@@ -220,9 +228,10 @@ function aiTap(locate: string | Object, options?: Object): Promise<void>;
     - `deepLocate?: boolean` - 是否开启[深度定位](#深度定位deeplocate)。该参数原来叫 `deepThink`，现已更名为 `deepLocate`。默认值为 false。
     - `xpath?: string` - 目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
     - `cacheable?: boolean` - 当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 true
-    - `fileChooserAccept?: string | string[]` - 当文件选择器弹出时，指定对应的文件路径。可以是单个文件路径或路径数组。仅在 web 页面（Playwright、Puppeteer）中可用。
+    - `fileChooserAccept?: string | string[]` - 当文件选择器弹出时，指定对应的文件路径。可以是单个文件路径或路径数组。仅在 web 页面（Playwright、Puppeteer 或 Chrome extension Bridge mode）中可用。
       - **注意**：如果文件输入框不支持多文件（没有 `multiple` 属性），但是传入了多个文件，会抛出错误。
       - **注意**：如果点击触发了文件选择器但没有传入 `fileChooserAccept` 参数，文件选择器会被忽略，页面可以继续正常操作。
+      - **注意**：Chrome extension Bridge mode 不支持目录上传输入框（`webkitdirectory` / `directory`）。如需上传目录，请使用 Playwright。
 - 返回值：
 
   - `Promise<void>`
@@ -242,7 +251,7 @@ await agent.aiTap('上传图片', { fileChooserAccept: ['./image1.jpg', './image
 
 ### `agent.aiHover()`
 
-> 仅在 web 页面中可用，在 Android 下不可用
+> 在 web 页面和 PC 桌面端（`@midscene/computer`）中可用，在移动端（Android / iOS）下不可用
 
 鼠标悬停某个元素上。
 
@@ -308,7 +317,7 @@ function aiInput(
     - `deepLocate?: boolean` - 是否开启[深度定位](#深度定位deeplocate)。该参数原来叫 `deepThink`，现已更名为 `deepLocate`。默认值为 false。
     - `xpath?: string` - 目标元素的 xpath 路径，用于执行当前操作。如果提供了这个 xpath，Midscene 会优先使用该 xpath 来找到元素，然后依次使用缓存和 AI 模型。默认值为空
     - `cacheable?: boolean` - 当启用 [缓存功能](./caching.mdx) 时，是否允许缓存当前 API 调用结果。默认值为 true
-    - `autoDismissKeyboard?: boolean` - 如果为 true，则键盘会在输入文本后自动关闭，仅在 Android/iOS 中有效。默认值为 true。
+    - `autoDismissKeyboard?: boolean` - 如果为 true，则键盘会在输入文本后自动关闭，仅在 Android/iOS/HarmonyOS 中有效。默认值为 true。
     - `mode?: 'replace' | 'clear' | 'typeOnly'` - 输入模式。(默认值: 'replace')
       - `'replace'`: 先清空输入框，然后输入文本。
       - `'typeOnly'`: 直接输入文本，不会先清空输入框。
@@ -568,10 +577,10 @@ await agent.aiPinch('图片', { direction: 'out', distance: 300, duration: 1000 
 
 :::info 平台支持
 
-- **Android** —— 通过 [YADB](https://github.com/ysbing/YADB) 的 `-pinch` 命令实现。
-- **iOS** —— 通过 W3C Actions API 双触摸指针实现。
-- **Web** —— 通过 CDP 触摸事件实现。Puppeteer/Playwright 需设置 `enableTouchEventsInActionSpace: true`。Playwright 仅支持 Chromium 内核浏览器。
-- **HarmonyOS** —— 不支持。`uitest` 框架未提供多触点 API。
+- **Android**：通过 [YADB](https://github.com/ysbing/YADB) 的 `-pinch` 命令实现。
+- **iOS**：通过 W3C Actions API 双触摸指针实现。
+- **Web**：通过 CDP 触摸事件实现。Puppeteer/Playwright 需设置 `enableTouchEventsInActionSpace: true`。Playwright 仅支持 Chromium 内核浏览器。
+- **HarmonyOS**：不支持。`uitest` 框架未提供多触点 API。
 
 :::
 
@@ -691,6 +700,8 @@ await agent.aiRightClick('页面顶部的文件名称', { deepLocate: true });
 ### `agent.aiAsk()`
 
 使用此方法，你可以针对当前页面，直接向 AI 模型发起提问，并获得字符串形式的回答。
+
+`aiAsk()` 与 `aiString()` 完全等价。
 
 - 类型
 
@@ -836,6 +847,8 @@ const numberB = await agent.aiNumber('账户剩余的积分元素的 value 值',
 ### `agent.aiString()`
 
 从 UI 中提取一个字符串。
+
+`aiString()` 与 `aiAsk()` 完全等价。
 
 - 类型
 
@@ -1048,6 +1061,56 @@ console.log(result);
 
 :::
 
+### `agent.runGherkinScenario()`
+
+运行一个 Gherkin Scenario，并把其中的步骤映射为 Midscene Agent 调用。
+
+:::caution Beta
+
+此 API 从 Midscene 1.10 开始支持，目前仍处于 Beta 阶段。未来 API 可能发生变化。
+
+:::
+
+- 类型
+
+```typescript
+function runGherkinScenario(
+  scenarioText: string,
+  options?: {
+    context?: string;
+    abortSignal?: AbortSignal;
+    deepThink?: 'unset' | true | false;
+    deepLocate?: boolean;
+  },
+): Promise<void>;
+```
+
+- 参数：
+
+  - `scenarioText: string` - 一个 Gherkin scenario，或者一组不带 `Scenario:` 头部的 Gherkin 步骤
+  - `options?: Object` - 可选的运行选项
+    - `context?: string` - 本次运行使用的临时上下文
+    - `abortSignal?: AbortSignal` - 用于中止本次运行的可选信号
+    - `deepThink?: 'unset' | true | false` - 传给 `Given` 和 `When` 步骤对应的 `aiAct`
+    - `deepLocate?: boolean` - 传给 `Given` 和 `When` 步骤对应的 `aiAct`
+
+- 返回值：
+
+  - `Promise<void>` - 所有步骤执行完成后 resolve。如果某个步骤失败，错误文案会包含 Gherkin 行号、原始步骤，以及当时正在执行的 Midscene 语义动作。
+
+- 示例：
+
+```typescript
+await agent.runGherkinScenario(`
+Scenario: 添加待办事项
+  Given 待办事项页面已经打开
+  When 我添加一条名为“买牛奶”的待办事项
+  Then 待办事项列表中应该包含“买牛奶”
+`);
+```
+
+关于支持规则、限制、缓存行为和 YAML 用法，请参考 [BDD 风格脚本（Gherkin）](./advanced/bdd-style-scripts-with-gherkin)。
+
 ### `agent.setAIActContext()`
 
 设置在调用 `agent.aiAct()` 或 `agent.ai()` 时，发送给 AI 模型的背景知识。这个设置会覆盖之前的设置。
@@ -1105,19 +1168,41 @@ console.log(result);
 
 ### `agent.recordToReport()`
 
-在报告文件中记录当前截图，并添加描述。
+默认在报告文件中记录当前截图并添加描述，也可以记录调用方传入的截图。
 
 - 类型
 
 ```typescript
-function recordToReport(title?: string, options?: Object): Promise<void>;
+interface RecordToReportOptions {
+  content?: string;
+  /** @deprecated 请改用 screenshots。 */
+  screenshotBase64?: string;
+  screenshots?: {
+    /**
+     * PNG/JPEG data URI，或裸 PNG base64 body。
+     */
+    base64: string;
+    description?: string;
+  }[];
+}
+
+function recordToReport(
+  title?: string,
+  options?: RecordToReportOptions,
+): Promise<void>;
 ```
 
 - 参数：
 
   - `title?: string` - 可选，截图的标题，如果未提供，则标题为 'untitled'。
-  - `options?: Object` - 可选，一个配置对象，包含：
+  - `options?: RecordToReportOptions` - 可选，一个配置对象，包含：
     - `content?: string` - 截图的描述。
+    - `screenshots?: Array<{ base64: string; description?: string }>` - 在同一个报告条目下记录一张或多张传入的截图。设置该选项后，Midscene 不会再自动截图。`base64` 推荐使用 PNG/JPEG data URI，例如 `data:image/png;base64,...`；也可以传裸 base64 body，此时会按 PNG 处理。
+
+- 兼容性：
+
+  `screenshotBase64?: string` 仍然作为向后兼容的单截图覆盖参数被接受。新代码建议使用
+  `screenshots: [{ base64 }]`。`screenshots` 和 `screenshotBase64` 二者只能传入一个。
 
 - 返回值：
 
@@ -1128,6 +1213,22 @@ function recordToReport(title?: string, options?: Object): Promise<void>;
 ```typescript
 await agent.recordToReport('登录页面', {
   content: '用户 A',
+});
+
+const before = await page.screenshot({ encoding: 'base64' });
+const after = await page.screenshot({ encoding: 'base64' });
+await agent.recordToReport('结算页对比', {
+  content: '对比提交前后的页面状态。',
+  screenshots: [
+    {
+      base64: `data:image/png;base64,${before}`,
+      description: '提交前',
+    },
+    {
+      base64: `data:image/png;base64,${after}`,
+      description: '提交后',
+    },
+  ],
 });
 ```
 
@@ -1237,12 +1338,11 @@ overrideAIConfig({
 
 ## 深度定位（deepLocate）
 
-`deepLocate` 是一个可选参数，适用于所有需要元素定位的 API（`aiTap`、`aiHover`、`aiInput`、`aiKeyboardPress`、`aiScroll`、`aiDoubleClick`、`aiRightClick`、`aiLocate` 等）。
+`deepLocate` 是一个可选参数，适用于所有需要元素定位的 API（`aiAct`、`aiTap`、`aiHover`、`aiInput`、`aiKeyboardPress`、`aiScroll`、`aiDoubleClick`、`aiRightClick`、`aiLocate` 等）。
 
-开启后，Midscene 会调用 AI 模型两次以精确定位元素，从而提升准确性。这在目标元素面积较小、难以和周围元素区分时非常有用。对于新一代模型（如 Qwen3 / Doubao 1.6 / Gemini 3），大多数场景下带来的收益不明显，建议按需开启。
+开启后，Midscene 会调用 AI 模型两次以精确定位元素，从而提升准确性。这在目标元素面积较小、难以和周围元素区分时非常有用。对于新一代模型（如 Qwen3.x / Doubao 2.0 / Gemini 3.5），大多数场景下带来的收益不明显，建议按需开启。
 
 - **默认值**：`false`
-- **参数更名**：该参数原来叫 `deepThink`，自 v1.5.1 起更名为 `deepLocate`，旧的 `deepThink` 参数仍然兼容。
 
 ```typescript
 // 开启 deepLocate 精确定位较难识别的元素
@@ -1251,13 +1351,15 @@ await agent.aiTap('右上角购物车图标', { deepLocate: true });
 
 :::note
 
-`aiAct()` 中的 `deepThink` 参数与此处的 `deepLocate` 是完全不同的功能：
+历史上，`deepThink` 这个名字在不同 API 中承担过两种含义：
 
-- `deepLocate`：控制元素**定位**时的二次确认策略，用于提升定位精度。
-- `aiAct()` 中的 `deepThink`：控制**规划阶段**的思考策略（AI 推理能力的开关）。
+- 在 `aiAct()` 中，`deepThink` 从一开始就表示**规划模式**，用于引导任务拆解和专注规划的思考过程。详情请参考 [aiAct deepThink 说明](./model-strategy#关于-aiact-方法的-deepthink-参数)。
+- 在 `aiTap`、`aiHover` 等单步操作方法中，旧的 `deepThink` 表示**定位增强**，等同于现在的 `deepLocate`。
 
-[参阅 aiAct deepThink 说明](./model-strategy#关于-aiact-方法的-deepthink-参数)
+为了区分这两种语义，自 v1.5.1 起，`deepThink` 只用于表示规划模式，定位增强统一命名为 `deepLocate`。
 
+- 对于 `aiAct()`，可以同时使用 `deepThink` 和 `deepLocate`：`deepThink` 控制规划模式，`deepLocate` 控制本节描述的深度定位。
+- 对于 `aiTap`、`aiHover` 等单步操作方法，如果需要提升定位精确度，推荐使用语义更清晰的 `deepLocate` 参数；旧的 `deepThink` 参数仍然兼容，语义等同于 `deepLocate`。
 :::
 
 ## 使用图片作为提示词

@@ -74,7 +74,6 @@ export function PlaygroundConversationPanel({
         onCancel={actions.finishCountdown}
         centered
         width={400}
-        style={{ top: '30%' }}
         styles={{
           mask: { backgroundColor: 'rgba(0, 0, 0, 0.75)' },
         }}
@@ -87,7 +86,7 @@ export function PlaygroundConversationPanel({
         >
           <div
             style={{
-              fontSize: '72px',
+              fontSize: '120px',
               fontWeight: 'bold',
               color: state.countdown === 'GO!' ? '#52c41a' : '#1890ff',
               marginBottom: '24px',
@@ -108,7 +107,9 @@ export function PlaygroundConversationPanel({
           <div
             style={{
               fontSize: '14px',
-              color: 'rgba(0, 0, 0, 0.65)',
+              // Theme-aware so the text stays legible against the dark
+              // Modal surface in dark mode (was hard-coded rgba black).
+              color: 'var(--midscene-text-secondary)',
             }}
           >
             The selected session requested a countdown before execution.

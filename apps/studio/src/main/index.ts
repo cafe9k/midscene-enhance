@@ -1,19 +1,56 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  stat,
+  writeFile as writeFileToDisk,
+} from 'node:fs/promises';
 import path from 'node:path';
-import { IPC_CHANNELS } from '@shared/electron-contract';
+import {
+  type ChooseFileSavePathRequest,
+  type ChooseReplayFileResult,
+  type DiscoverDevicesRequest,
+  IPC_CHANNELS,
+  type PrepareRecorderMarkdownReplayRequest,
+  type WriteFileRequest,
+  type WriteReportFileRequest,
+} from '@shared/electron-contract';
+import type { NativeThemeMode } from '@shared/electron-contract';
 import { resolveExternalUrl } from '@shared/external-links';
 import {
   BrowserWindow,
   type NativeImage,
+  type OpenDialogOptions,
   app,
+  dialog,
   ipcMain,
   nativeImage,
+  nativeTheme,
   shell,
 } from 'electron';
 import type { TitleBarOverlay } from 'electron';
-import { runConnectivityTest } from './playground/connectivity-test';
-import { discoverAllDevices } from './playground/device-discovery';
-import { createMultiPlatformRuntimeService } from './playground/multi-platform-runtime';
+import { requestPlaygroundBootstrap } from './playground/bootstrap-request';
+import type { PlaygroundRuntimeService } from './playground/types';
+import {
+  describeRecorderUIEventsInMain,
+  generateRecorderCodeInMain,
+  generateRecorderMetadataInMain,
+} from './recorder/codegen';
+import { configureStudioShellEnvHydration } from './shell-env';
+import { studioUpdater } from './updater';
+import { registerUpdaterHandlers } from './updater-handlers';
+import { registerWindowRevealHandlers } from './window-reveal';
+
+// macOS GUI launches (Finder, Dock) skip the user's login shell, so
+// `ANDROID_HOME`, `PATH` additions for adb/hdc/xcrun, etc. never reach
+// `process.env`. Configure the hydrator once here, but only run it lazily
+// from the device-specific paths that actually need those binaries.
+configureStudioShellEnvHydration({
+  isPackaged: app.isPackaged,
+  log: (message, error) => console.warn(`[studio:shell-env] ${message}`, error),
+});
 
 /**
  * Main process owns native shell concerns only.
@@ -23,10 +60,19 @@ import { createMultiPlatformRuntimeService } from './playground/multi-platform-r
 
 let mainWindow: BrowserWindow | null = null;
 let cachedAppIcon: NativeImage | null = null;
-const playgroundRuntime = createMultiPlatformRuntimeService();
+let playgroundRuntimePromise: Promise<PlaygroundRuntimeService> | null = null;
+let deviceDiscoveryServicePromise: Promise<
+  import('./playground/device-discovery').DeviceDiscoveryService
+> | null = null;
+const isStudioSmokeTest = process.env.MIDSCENE_STUDIO_SMOKE_TEST === '1';
+const isStudioE2ETest = process.env.MIDSCENE_STUDIO_E2E_TEST === '1';
+const STUDIO_SMOKE_READY_MARKER = 'MIDSCENE_STUDIO_SMOKE_READY';
+const STUDIO_SMOKE_FAILED_MARKER = 'MIDSCENE_STUDIO_SMOKE_FAILED';
+const STUDIO_E2E_READY_MARKER = 'MIDSCENE_STUDIO_E2E_READY';
+const STUDIO_E2E_FAILED_MARKER = 'MIDSCENE_STUDIO_E2E_FAILED';
 
 // Expose the Chromium DevTools Protocol on a fixed port in dev so external
-// profilers (e.g. chrome-devtools-mcp at http://localhost:9224) can attach to
+// profilers (for example, a CDP client at http://localhost:9224) can attach to
 // the renderer without the user keeping DevTools open. Production builds never
 // set this — it would be a liability. The port can be overridden with the
 // MIDSCENE_STUDIO_CDP_PORT env var when multiple dev instances are running.
@@ -48,6 +94,9 @@ const getAppIconPath = () => {
     path.resolve(process.resourcesPath, 'assets/midscene-icon.png'),
     path.resolve(app.getAppPath(), 'assets/midscene-icon.png'),
     path.resolve(__dirname, '../assets/midscene-icon.png'),
+    // Dev mode: rsbuild dev does not run sync-static-assets, so fall back to
+    // the source assets directory next to the package.json.
+    path.resolve(__dirname, '../../assets/midscene-icon.png'),
   ];
 
   const iconPath = candidatePaths.find((candidatePath) =>
@@ -78,8 +127,31 @@ const getAppIcon = () => {
   return icon;
 };
 
+const resolveStudioUserRunDir = () =>
+  path.join(app.getPath('userData'), 'midscene_run');
+
+const resolveStudioTempRunDir = () =>
+  path.join(app.getPath('temp'), 'midscene-studio');
+
+const ensureStudioRunDirEnv = () => {
+  const currentRunDir = process.env.MIDSCENE_RUN_DIR;
+  const tempRunDir = resolveStudioTempRunDir();
+  const runDir =
+    currentRunDir && path.resolve(currentRunDir) !== path.resolve(tempRunDir)
+      ? currentRunDir
+      : resolveStudioUserRunDir();
+
+  process.env.MIDSCENE_RUN_DIR = runDir;
+  mkdirSync(runDir, { recursive: true });
+};
+
+// macOS `vibrancy` and Windows `backgroundMaterial: 'acrylic'` only show
+// through when the BrowserWindow's own backgroundColor is fully transparent
+// — any opaque fill paints over the OS material. Linux has no native
+// material, so keep the solid fallback there to avoid flashing the
+// desktop wallpaper before the renderer mounts.
 const getBackgroundColor = () =>
-  process.platform === 'darwin' ? '#00000000' : '#eef1f5';
+  process.platform === 'linux' ? '#eef1f5' : '#00000000';
 
 const getTitleBarOverlay = (): TitleBarOverlay => ({
   color: '#00000000',
@@ -87,8 +159,177 @@ const getTitleBarOverlay = (): TitleBarOverlay => ({
   symbolColor: '#17212b',
 });
 
+const DEFAULT_REPORT_FILE_NAME = 'midscene_report.html';
+const DEFAULT_EXPORT_FILE_NAME = 'midscene_export.json';
+
+const ensureHtmlFileName = (value: string) =>
+  value.toLowerCase().endsWith('.html') ? value : `${value}.html`;
+
+const resolveDefaultReportSavePath = (defaultFileName?: string) => {
+  const safeFileName = path.basename(
+    ensureHtmlFileName(defaultFileName?.trim() || DEFAULT_REPORT_FILE_NAME),
+  );
+  return path.join(app.getPath('downloads'), safeFileName);
+};
+
+const resolveDefaultFileSavePath = (defaultFileName?: string) => {
+  const safeFileName = path.basename(
+    defaultFileName?.trim() || DEFAULT_EXPORT_FILE_NAME,
+  );
+  return path.join(app.getPath('downloads'), safeFileName);
+};
+
+const ensureFileExtensionFromFilters = (
+  filePath: string,
+  filters?: ChooseFileSavePathRequest['filters'],
+) => {
+  if (path.extname(filePath)) {
+    return filePath;
+  }
+  const firstExtension = filters?.find((filter) => filter.extensions.length)
+    ?.extensions[0];
+  if (!firstExtension) {
+    return filePath;
+  }
+  if (firstExtension === '*') {
+    return filePath;
+  }
+  return `${filePath}.${firstExtension.replace(/^\./, '')}`;
+};
+
+const MARKDOWN_REPLAY_EXTENSIONS = new Set(['.md', '.markdown']);
+const YAML_REPLAY_EXTENSIONS = new Set(['.yaml', '.yml']);
+
+const getReplayFileType = (filePath: string) => {
+  const extension = path.extname(filePath).toLowerCase();
+  if (MARKDOWN_REPLAY_EXTENSIONS.has(extension)) {
+    return 'markdown' as const;
+  }
+  if (YAML_REPLAY_EXTENSIONS.has(extension)) {
+    return 'yaml' as const;
+  }
+  return null;
+};
+
+async function findMarkdownReplayFileInDirectory(directoryPath: string) {
+  const preferredFileNames = ['recording.md', 'recording.markdown'];
+  for (const fileName of preferredFileNames) {
+    const candidatePath = path.join(directoryPath, fileName);
+    try {
+      const candidateStats = await stat(candidatePath);
+      if (candidateStats.isFile()) {
+        return candidatePath;
+      }
+    } catch {
+      // Continue to the generic scan below.
+    }
+  }
+
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const markdownEntry = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right))
+    .find((fileName) => MARKDOWN_REPLAY_EXTENSIONS.has(path.extname(fileName)));
+
+  return markdownEntry ? path.join(directoryPath, markdownEntry) : null;
+}
+
+const resolveReplayBundlePath = (baseDir: string, relativePath: string) => {
+  const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  if (!normalized || path.isAbsolute(normalized)) {
+    throw new Error(`Invalid replay screenshot path: ${relativePath}`);
+  }
+  const targetPath = path.resolve(baseDir, normalized);
+  const normalizedBaseDir = path.resolve(baseDir);
+  if (
+    targetPath !== normalizedBaseDir &&
+    !targetPath.startsWith(`${normalizedBaseDir}${path.sep}`)
+  ) {
+    throw new Error(`Replay screenshot path escapes bundle: ${relativePath}`);
+  }
+  return targetPath;
+};
+
+async function prepareRecorderMarkdownReplayBundle(
+  request: PrepareRecorderMarkdownReplayRequest,
+) {
+  if (!request || typeof request.markdown !== 'string') {
+    throw new Error('prepareRecorderMarkdownReplay: markdown is required');
+  }
+  const bundleDir = await mkdtemp(
+    path.join(app.getPath('temp'), 'midscene-studio-replay-'),
+  );
+  const markdownPath = path.join(bundleDir, 'recording.md');
+  await writeFileToDisk(markdownPath, request.markdown, 'utf-8');
+
+  for (const screenshot of request.screenshots || []) {
+    if (
+      !screenshot ||
+      typeof screenshot.relativePath !== 'string' ||
+      typeof screenshot.base64Data !== 'string'
+    ) {
+      continue;
+    }
+    const screenshotPath = resolveReplayBundlePath(
+      bundleDir,
+      screenshot.relativePath,
+    );
+    await mkdir(path.dirname(screenshotPath), { recursive: true });
+    await writeFileToDisk(
+      screenshotPath,
+      Buffer.from(screenshot.base64Data, 'base64'),
+    );
+  }
+
+  return { markdownPath };
+}
+
+const getPlaygroundRuntime = async (): Promise<PlaygroundRuntimeService> => {
+  if (!playgroundRuntimePromise) {
+    playgroundRuntimePromise = import('./playground/multi-platform-runtime')
+      .then(({ createMultiPlatformRuntimeService }) =>
+        createMultiPlatformRuntimeService({
+          deviceDiscoveryService: getDeviceDiscoveryService(),
+        }),
+      )
+      .catch((error) => {
+        playgroundRuntimePromise = null;
+        throw error;
+      });
+  }
+
+  return playgroundRuntimePromise;
+};
+
+const closePlaygroundRuntime = async (): Promise<void> => {
+  if (!playgroundRuntimePromise) {
+    return;
+  }
+
+  const runtime = await playgroundRuntimePromise;
+  await runtime.close();
+};
+
+const getDeviceDiscoveryService = async () => {
+  if (!deviceDiscoveryServicePromise) {
+    deviceDiscoveryServicePromise = import('./playground/device-discovery')
+      .then(({ createDeviceDiscoveryService }) =>
+        createDeviceDiscoveryService(),
+      )
+      .catch((error) => {
+        deviceDiscoveryServicePromise = null;
+        throw error;
+      });
+  }
+
+  return deviceDiscoveryServicePromise;
+};
+
 const createMainWindow = () => {
   const rendererDevUrl = process.env.MIDSCENE_STUDIO_RENDERER_URL;
+  const rendererEntryPath = getRendererEntryPath();
+  const preloadEntryPath = getPreloadEntryPath();
   const appIcon = getAppIcon();
   const window = new BrowserWindow({
     width: 1440,
@@ -101,32 +342,96 @@ const createMainWindow = () => {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     titleBarOverlay:
       process.platform === 'darwin' ? undefined : getTitleBarOverlay(),
+    // Vertical centers of the 12px traffic lights line up with the sidebar
+    // collapse toggle (24px) at window y=20: (8 + 24/2 = 20 = 14 + 12/2).
+    // y=14 hugs the inset titlebar like native macOS apps.
     trafficLightPosition:
-      process.platform === 'darwin' ? { x: 18, y: 18 } : undefined,
-    transparent: process.platform === 'darwin',
-    vibrancy: process.platform === 'darwin' ? 'under-window' : undefined,
+      process.platform === 'darwin' ? { x: 18, y: 14 } : undefined,
+    vibrancy: process.platform === 'darwin' ? 'sidebar' : undefined,
     visualEffectState: process.platform === 'darwin' ? 'active' : undefined,
-    backgroundMaterial: process.platform === 'win32' ? 'mica' : undefined,
+    backgroundMaterial: process.platform === 'win32' ? 'acrylic' : undefined,
     icon: appIcon,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: getPreloadEntryPath(),
+      preload: preloadEntryPath,
       sandbox: false,
     },
   });
 
-  window.once('ready-to-show', () => {
-    window.show();
+  registerWindowRevealHandlers({
+    isDestroyed: () => window.isDestroyed(),
+    onDidFailLoad: (listener) =>
+      window.webContents.once('did-fail-load', listener),
+    onDidFinishLoad: (listener) =>
+      window.webContents.once('did-finish-load', listener),
+    onReadyToShow: (listener) => window.once('ready-to-show', listener),
+    show: () => window.show(),
   });
+
+  if (isStudioSmokeTest || isStudioE2ETest) {
+    window.webContents.once('did-finish-load', () => {
+      if (isStudioSmokeTest) {
+        console.log(STUDIO_SMOKE_READY_MARKER);
+        setTimeout(() => {
+          app.exit(0);
+        }, 100);
+        return;
+      }
+
+      console.log(STUDIO_E2E_READY_MARKER);
+    });
+
+    window.webContents.once(
+      'did-fail-load',
+      (_event, errorCode, errorDescription, validatedURL) => {
+        const failedMarker = isStudioSmokeTest
+          ? STUDIO_SMOKE_FAILED_MARKER
+          : STUDIO_E2E_FAILED_MARKER;
+        console.error(
+          `${failedMarker}: did-fail-load ${errorCode} ${errorDescription} ${validatedURL}`,
+        );
+        app.exit(1);
+      },
+    );
+
+    window.webContents.once('render-process-gone', (_event, details) => {
+      const failedMarker = isStudioSmokeTest
+        ? STUDIO_SMOKE_FAILED_MARKER
+        : STUDIO_E2E_FAILED_MARKER;
+      console.error(`${failedMarker}: render-process-gone ${details.reason}`);
+      app.exit(1);
+    });
+  }
 
   if (rendererDevUrl) {
     window.loadURL(rendererDevUrl);
   } else {
-    window.loadFile(getRendererEntryPath());
+    void window.loadFile(rendererEntryPath).catch((error) => {
+      console.error('Failed to load Midscene Studio renderer:', error);
+    });
   }
 
   mainWindow = window;
+
+  // Push every OS appearance change to the renderer so system-follow keeps
+  // working even after `themeSource` has been toggled. The renderer
+  // matchMedia listener silently stops firing across some Electron versions
+  // once themeSource is explicitly set, so we keep nativeTheme as the
+  // authoritative signal here.
+  const handleNativeThemeUpdated = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    mainWindow.webContents.send(
+      IPC_CHANNELS.systemThemeChanged,
+      nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    );
+  };
+  nativeTheme.on('updated', handleNativeThemeUpdated);
+  window.once('closed', () => {
+    nativeTheme.off('updated', handleNativeThemeUpdated);
+  });
 };
 
 const registerIpcHandlers = () => {
@@ -136,6 +441,114 @@ const registerIpcHandlers = () => {
   ipcMain.handle(IPC_CHANNELS.openExternalUrl, async (_event, url: string) => {
     await shell.openExternal(resolveExternalUrl(url));
   });
+  ipcMain.handle(
+    IPC_CHANNELS.chooseReportSavePath,
+    async (_event, defaultFileName?: string) => {
+      const dialogOptions = {
+        title: 'Save Midscene Report',
+        defaultPath: resolveDefaultReportSavePath(defaultFileName),
+        filters: [
+          {
+            name: 'HTML Report',
+            extensions: ['html'],
+          },
+        ],
+      };
+      const result = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+
+      return ensureHtmlFileName(result.filePath);
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.chooseFileSavePath,
+    async (_event, request?: ChooseFileSavePathRequest) => {
+      const filters =
+        request?.filters && request.filters.length > 0
+          ? request.filters
+          : [{ name: 'All Files', extensions: ['*'] }];
+      const dialogOptions = {
+        title: request?.title || 'Save Midscene Export',
+        defaultPath: resolveDefaultFileSavePath(request?.defaultFileName),
+        filters,
+      };
+      const result = mainWindow
+        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+
+      if (result.canceled || !result.filePath) {
+        return null;
+      }
+
+      return ensureFileExtensionFromFilters(result.filePath, filters);
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.chooseReplayFile,
+    async (): Promise<ChooseReplayFileResult> => {
+      const dialogOptions: OpenDialogOptions = {
+        title: 'Choose Markdown or YAML Replay',
+        properties: ['openFile', 'openDirectory', 'treatPackageAsDirectory'],
+        filters: [
+          {
+            name: 'Replay Files',
+            extensions: ['md', 'markdown', 'yaml', 'yml'],
+          },
+          {
+            name: 'All Files',
+            extensions: ['*'],
+          },
+        ],
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
+
+      if (result.canceled || !result.filePaths[0]) {
+        return null;
+      }
+
+      const filePath = result.filePaths[0];
+      const fileStats = await stat(filePath);
+      if (fileStats.isDirectory()) {
+        const markdownPath = await findMarkdownReplayFileInDirectory(filePath);
+        if (!markdownPath) {
+          throw new Error(
+            'Selected folder does not contain recording.md or a Markdown replay file.',
+          );
+        }
+        return {
+          type: 'markdown',
+          content: await readFile(markdownPath, 'utf-8'),
+          displayName: `${path.basename(filePath)}/${path.basename(markdownPath)}`,
+        };
+      }
+
+      const type = getReplayFileType(filePath);
+      if (!type) {
+        throw new Error('Only Markdown and YAML replay files are supported.');
+      }
+
+      if (type === 'markdown') {
+        return {
+          type,
+          content: await readFile(filePath, 'utf-8'),
+          displayName: path.basename(filePath),
+        };
+      }
+
+      return {
+        type,
+        content: await readFile(filePath, 'utf-8'),
+        displayName: path.basename(filePath),
+      };
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.toggleMaximizeWindow, () => {
     if (!mainWindow) return;
     if (mainWindow.isMaximized()) {
@@ -147,32 +560,167 @@ const registerIpcHandlers = () => {
   ipcMain.handle(IPC_CHANNELS.closeWindow, () => {
     mainWindow?.close();
   });
+  ipcMain.handle(
+    IPC_CHANNELS.setNativeTheme,
+    (_event, mode: NativeThemeMode) => {
+      if (mode !== 'light' && mode !== 'dark' && mode !== 'system') {
+        throw new Error(`setNativeTheme: invalid mode ${String(mode)}`);
+      }
+      nativeTheme.themeSource = mode;
+      // macOS doesn't auto-refresh NSVisualEffectView's appearance when
+      // `themeSource` flips, so the sidebar vibrancy keeps the old (light)
+      // variant. Re-applying vibrancy + backgroundColor forces a redraw with
+      // the current appearance. Also keeps the BrowserWindow's solid
+      // backgroundColor fallback in sync so non-vibrancy platforms
+      // (Linux, or vibrancy-failed states) match the theme.
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        return;
+      }
+      const isDark = nativeTheme.shouldUseDarkColors;
+      // Keep the window backgroundColor transparent on platforms that rely
+      // on OS material (macOS vibrancy / Windows acrylic); only Linux needs
+      // a solid theme-tinted fallback.
+      if (process.platform === 'linux') {
+        mainWindow.setBackgroundColor(isDark ? '#171717' : '#eef1f5');
+      } else {
+        mainWindow.setBackgroundColor('#00000000');
+      }
+      if (process.platform === 'darwin') {
+        mainWindow.setVibrancy('sidebar');
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.writeReportFile,
+    async (_event, request: WriteReportFileRequest) => {
+      const targetPath = request?.path?.trim();
+      if (!targetPath) {
+        throw new Error('writeReportFile: path is required');
+      }
+      if (typeof request.content !== 'string') {
+        throw new Error('writeReportFile: content must be a string');
+      }
+
+      await writeFileToDisk(
+        ensureHtmlFileName(targetPath),
+        request.content,
+        'utf-8',
+      );
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.writeFile,
+    async (_event, request: WriteFileRequest) => {
+      const targetPath = request?.path?.trim();
+      if (!targetPath) {
+        throw new Error('writeFile: path is required');
+      }
+      if (typeof request.content !== 'string') {
+        throw new Error('writeFile: content must be a string');
+      }
+      if (request.encoding === 'base64') {
+        await writeFileToDisk(
+          targetPath,
+          Buffer.from(request.content, 'base64'),
+        );
+        return;
+      }
+      if (request.encoding && request.encoding !== 'utf-8') {
+        throw new Error(`writeFile: unsupported encoding ${request.encoding}`);
+      }
+      await writeFileToDisk(targetPath, request.content, 'utf-8');
+    },
+  );
   // Multi-platform playground — a single server for Android, iOS,
   // HarmonyOS, and Computer. Legacy channel names (getAndroidPlayground*)
   // are aliased to the same strings in IPC_CHANNELS, so the old
   // renderer code keeps working transparently.
-  ipcMain.handle(IPC_CHANNELS.getPlaygroundBootstrap, () =>
-    playgroundRuntime.getBootstrap(),
-  );
+  ipcMain.handle(IPC_CHANNELS.getPlaygroundBootstrap, async () => {
+    const runtime = await getPlaygroundRuntime();
+    return requestPlaygroundBootstrap(runtime, (error) => {
+      console.error(
+        'Failed to start Midscene Studio playground runtime:',
+        error,
+      );
+    });
+  });
   ipcMain.handle(IPC_CHANNELS.restartPlayground, async () =>
-    playgroundRuntime.restart(),
+    (await getPlaygroundRuntime()).restart(),
   );
-  ipcMain.handle(IPC_CHANNELS.discoverDevices, async () =>
-    discoverAllDevices(),
+  ipcMain.handle(
+    IPC_CHANNELS.discoverDevices,
+    async (_event, request?: DiscoverDevicesRequest) =>
+      (await getDeviceDiscoveryService()).getSnapshot({
+        forceRefresh: request?.forceRefresh,
+      }),
   );
-  ipcMain.handle(IPC_CHANNELS.runConnectivityTest, async (_event, request) =>
-    runConnectivityTest(request),
+  ipcMain.handle(
+    IPC_CHANNELS.setDiscoveryPollingPaused,
+    async (_event, paused: boolean) => {
+      (await getDeviceDiscoveryService()).setPollingPaused(Boolean(paused));
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.runConnectivityTest, async (_event, request) => {
+    const { runConnectivityTest } = await import(
+      './playground/connectivity-test'
+    );
+    return runConnectivityTest(request);
+  });
+  ipcMain.handle(IPC_CHANNELS.generateRecorderCode, async (_event, request) => {
+    return generateRecorderCodeInMain(request);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.generateRecorderMetadata,
+    async (_event, request) => {
+      return generateRecorderMetadataInMain(request);
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.describeRecorderUIEvents,
+    async (_event, request) => {
+      return describeRecorderUIEventsInMain(request);
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.prepareRecorderMarkdownReplay,
+    async (_event, request) => prepareRecorderMarkdownReplayBundle(request),
   );
 };
 
 app.whenReady().then(() => {
+  ensureStudioRunDirEnv();
+
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(getAppIcon());
   }
 
+  void getDeviceDiscoveryService()
+    .then((service) =>
+      service.subscribe((devices) => {
+        if (!mainWindow || mainWindow.isDestroyed()) {
+          return;
+        }
+
+        mainWindow.webContents.send(
+          IPC_CHANNELS.discoveredDevicesUpdated,
+          devices,
+        );
+      }),
+    )
+    .catch((error) => {
+      console.error('Failed to initialize device discovery service:', error);
+    });
+
   registerIpcHandlers();
-  void playgroundRuntime.start();
+  registerUpdaterHandlers(studioUpdater);
   createMainWindow();
+
+  // studioUpdater.init() no-ops when !app.isPackaged, and we skip the
+  // call entirely when running under the smoke/e2e harness so test runs
+  // do not hit the GitHub Releases API.
+  if (!isStudioSmokeTest && !isStudioE2ETest) {
+    studioUpdater.init(() => mainWindow);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -188,5 +736,12 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  void playgroundRuntime.close();
+  void closePlaygroundRuntime();
+  void getDeviceDiscoveryService()
+    .then((service) => {
+      service.close();
+    })
+    .catch(() => {
+      // ignore cleanup failures during shutdown
+    });
 });

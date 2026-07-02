@@ -39,6 +39,7 @@ function createRDPComputerDevice(opts: RDPComputerAgentOpt): RDPDevice {
     username: opts.username,
     password: opts.password,
     domain: opts.domain,
+    localAddress: opts.localAddress,
     adminSession: opts.adminSession,
     ignoreCertificate: opts.ignoreCertificate,
     securityProtocol: opts.securityProtocol,
@@ -49,20 +50,25 @@ function createRDPComputerDevice(opts: RDPComputerAgentOpt): RDPDevice {
   });
 }
 
-export async function agentFromComputer(
+export async function agentForComputer(
   opts?: LocalComputerAgentOpt,
 ): Promise<ComputerAgent<ComputerDevice>>;
 
 /**
- * Create an Agent from computer
+ * Create an Agent for local computer
  */
-export async function agentFromComputer(
+export async function agentForComputer(
   opts?: ComputerAgentOpt,
 ): Promise<ComputerAgent> {
   const device = createLocalComputerDevice(opts);
   await device.connect();
   return new ComputerAgent(device, opts);
 }
+
+/**
+ * @deprecated Use `agentForComputer` instead.
+ */
+export const agentFromComputer = agentForComputer;
 
 export async function agentForRDPComputer(
   opts: RDPComputerAgentOpt,

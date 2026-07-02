@@ -8,10 +8,11 @@ export const MIDSCENE_DEBUG_MODEL_RESPONSE = 'MIDSCENE_DEBUG_MODEL_RESPONSE';
 export const MIDSCENE_DANGEROUSLY_PRINT_ALL_CONFIG =
   'MIDSCENE_DANGEROUSLY_PRINT_ALL_CONFIG';
 export const MIDSCENE_DEBUG_MODE = 'MIDSCENE_DEBUG_MODE';
-export const MIDSCENE_MCP_USE_PUPPETEER_MODE =
-  'MIDSCENE_MCP_USE_PUPPETEER_MODE';
+export const MIDSCENE_CHROME_PATH = 'MIDSCENE_CHROME_PATH';
+/**
+ * @deprecated Use MIDSCENE_CHROME_PATH instead. This is kept for backward compatibility.
+ */
 export const MIDSCENE_MCP_CHROME_PATH = 'MIDSCENE_MCP_CHROME_PATH';
-export const MIDSCENE_MCP_ANDROID_MODE = 'MIDSCENE_MCP_ANDROID_MODE';
 export const DOCKER_CONTAINER = 'DOCKER_CONTAINER';
 
 // Observability
@@ -24,7 +25,6 @@ export const MIDSCENE_MODEL_HTTP_PROXY = 'MIDSCENE_MODEL_HTTP_PROXY';
 // New primary names for public API
 export const MIDSCENE_MODEL_API_KEY = 'MIDSCENE_MODEL_API_KEY';
 export const MIDSCENE_MODEL_BASE_URL = 'MIDSCENE_MODEL_BASE_URL';
-export const MIDSCENE_MODEL_MAX_TOKENS = 'MIDSCENE_MODEL_MAX_TOKENS';
 export const MIDSCENE_MODEL_TIMEOUT = 'MIDSCENE_MODEL_TIMEOUT';
 export const MIDSCENE_MODEL_TEMPERATURE = 'MIDSCENE_MODEL_TEMPERATURE';
 export const MIDSCENE_MODEL_RETRY_COUNT = 'MIDSCENE_MODEL_RETRY_COUNT';
@@ -35,6 +35,8 @@ export const MIDSCENE_MODEL_REASONING_ENABLED =
   'MIDSCENE_MODEL_REASONING_ENABLED';
 export const MIDSCENE_MODEL_REASONING_BUDGET =
   'MIDSCENE_MODEL_REASONING_BUDGET';
+
+export type TModelReasoningEnabled = boolean | 'default';
 
 /**
  * @deprecated Use MIDSCENE_MODEL_API_KEY instead. This is kept for backward compatibility.
@@ -57,11 +59,6 @@ export const MIDSCENE_OPENAI_HTTP_PROXY = 'MIDSCENE_OPENAI_HTTP_PROXY';
  * @deprecated Use MIDSCENE_MODEL_SOCKS_PROXY instead. This is kept for backward compatibility.
  */
 export const MIDSCENE_OPENAI_SOCKS_PROXY = 'MIDSCENE_OPENAI_SOCKS_PROXY';
-/**
- * @deprecated Use MIDSCENE_MODEL_MAX_TOKENS instead. This is kept for backward compatibility.
- */
-export const OPENAI_MAX_TOKENS = 'OPENAI_MAX_TOKENS';
-
 export const MIDSCENE_ADB_PATH = 'MIDSCENE_ADB_PATH';
 export const MIDSCENE_ADB_REMOTE_HOST = 'MIDSCENE_ADB_REMOTE_HOST';
 export const MIDSCENE_ADB_REMOTE_PORT = 'MIDSCENE_ADB_REMOTE_PORT';
@@ -69,6 +66,8 @@ export const MIDSCENE_ANDROID_IME_STRATEGY = 'MIDSCENE_ANDROID_IME_STRATEGY';
 
 export const MIDSCENE_IOS_DEVICE_UDID = 'MIDSCENE_IOS_DEVICE_UDID';
 export const MIDSCENE_IOS_SIMULATOR_UDID = 'MIDSCENE_IOS_SIMULATOR_UDID';
+export const MIDSCENE_IOS_DEVICE_CLASS_OVERRIDE =
+  'MIDSCENE_IOS_DEVICE_CLASS_OVERRIDE';
 
 export const MIDSCENE_CACHE = 'MIDSCENE_CACHE';
 export const MIDSCENE_USE_VLM_UI_TARS = 'MIDSCENE_USE_VLM_UI_TARS';
@@ -168,22 +167,17 @@ export const BASIC_ENV_KEYS = [
 
 export const BOOLEAN_ENV_KEYS = [
   MIDSCENE_CACHE,
-  MIDSCENE_MCP_USE_PUPPETEER_MODE,
-  MIDSCENE_MCP_ANDROID_MODE,
   MIDSCENE_LANGSMITH_DEBUG,
   MIDSCENE_LANGFUSE_DEBUG,
   MIDSCENE_REPORT_QUIET,
 ] as const;
 
 export const NUMBER_ENV_KEYS = [
-  MIDSCENE_MODEL_MAX_TOKENS,
   MIDSCENE_CACHE_MAX_FILENAME_LENGTH,
   MIDSCENE_REPLANNING_CYCLE_LIMIT,
 ] as const;
 
 export const STRING_ENV_KEYS = [
-  MIDSCENE_MODEL_MAX_TOKENS,
-  OPENAI_MAX_TOKENS,
   MIDSCENE_ADB_PATH,
   MIDSCENE_ADB_REMOTE_HOST,
   MIDSCENE_ADB_REMOTE_PORT,
@@ -193,6 +187,7 @@ export const STRING_ENV_KEYS = [
   MIDSCENE_REPORT_TAG_NAME,
   MIDSCENE_PREFERRED_LANGUAGE,
   MATCH_BY_POSITION,
+  MIDSCENE_CHROME_PATH,
   MIDSCENE_MCP_CHROME_PATH,
   DOCKER_CONTAINER,
 ] as const;
@@ -292,6 +287,7 @@ export type TGlobalConfig = Record<TEnvKeys, string | undefined>;
 export type TModelFamily =
   | 'qwen2.5-vl'
   | 'qwen3-vl'
+  | 'qwen3'
   | 'qwen3.5'
   | 'qwen3.6'
   | 'doubao-vision'
@@ -303,7 +299,9 @@ export type TModelFamily =
   | 'glm-v'
   | 'auto-glm'
   | 'auto-glm-multilingual'
-  | 'gpt-5';
+  | 'gpt-5'
+  | 'kimi'
+  | 'xiaomi-mimo';
 
 export const MODEL_FAMILY_VALUES: TModelFamily[] = [
   'doubao-vision',
@@ -311,6 +309,7 @@ export const MODEL_FAMILY_VALUES: TModelFamily[] = [
   'gemini',
   'qwen2.5-vl',
   'qwen3-vl',
+  'qwen3',
   'qwen3.5',
   'qwen3.6',
   'vlm-ui-tars',
@@ -320,6 +319,8 @@ export const MODEL_FAMILY_VALUES: TModelFamily[] = [
   'auto-glm',
   'auto-glm-multilingual',
   'gpt-5',
+  'kimi',
+  'xiaomi-mimo',
 ];
 
 export interface IModelConfigForInsight {
@@ -385,7 +386,7 @@ export interface IModelConfigForDefault {
   [MIDSCENE_MODEL_TEMPERATURE]?: string;
   // reasoning effort
   [MIDSCENE_MODEL_REASONING_EFFORT]?: string;
-  // enable reasoning (boolean as string)
+  // enable reasoning (boolean/default as string)
   [MIDSCENE_MODEL_REASONING_ENABLED]?: string;
   // reasoning budget (number as string)
   [MIDSCENE_MODEL_REASONING_BUDGET]?: string;
@@ -425,7 +426,7 @@ export enum UITarsModelVersion {
 
 /**
  * Callback to create custom OpenAI client instance
- * @param config - Resolved model configuration including apiKey, baseURL, modelName, intent, etc.
+ * @param config - Resolved model configuration including apiKey, baseURL, modelName, intent, slot, etc.
  * @returns OpenAI client instance (can be wrapped with langsmith, langfuse, etc.)
  *
  * Note: Wrapper functions like langsmith's wrapOpenAI() return the same OpenAI instance
@@ -504,8 +505,9 @@ export interface IModelConfig {
   /**
    * Enable/disable reasoning for the model.
    * Passed through to model-family-specific parameters (e.g., enable_thinking for qwen, thinking.type for doubao/glm-v).
+   * "default" means following the model provider's default without sending reasoning controls.
    */
-  reasoningEnabled?: boolean;
+  reasoningEnabled?: TModelReasoningEnabled;
   /**
    * Reasoning token budget for the model.
    * Passed through to model-family-specific parameters (e.g., thinking_budget for qwen).
@@ -519,9 +521,16 @@ export interface IModelConfig {
   uiTarsModelVersion?: UITarsModelVersion;
   modelDescription: string;
   /**
-   * original intent from the config
+   * The semantic intent this config is requested for.
+   * For example, getModelConfig('planning') always returns intent === 'planning'.
    */
   intent: TIntent;
+  /**
+   * The model-config slot this config was resolved from.
+   * For example, getModelConfig('planning') may resolve from slot === 'default'
+   * when MIDSCENE_PLANNING_MODEL_NAME is not configured.
+   */
+  slot: TIntent;
   /**
    * Custom OpenAI client factory function
    *

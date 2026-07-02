@@ -1,23 +1,26 @@
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+  compositePointMarkerImg,
   httpImg2Base64,
   imageInfoOfBase64,
   isValidPNGImageBuffer,
   localImg2Base64,
   resizeAndConvertImgBuffer,
   resizeImgBase64,
-} from 'src/img';
+  validateScreenshotBuffer,
+} from '../../../src/img';
 import {
   createImgBase64ByFormat,
   cropByRect,
   paddingToMatchBlockByBase64,
   parseBase64,
   saveBase64Image,
-} from 'src/img/transform';
-import { getFixture } from 'tests/utils';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+} from '../../../src/img/transform';
+import { getFixture } from '../../utils';
 
 describe('imageInfoOfBase64', () => {
   it('returns correct dimensions for PNG image', async () => {
@@ -52,11 +55,23 @@ describe('imageInfoOfBase64', () => {
   it('throws error for invalid base64 data', async () => {
     const invalidBase64 = 'data:image/png;base64,notvalidbase64data';
 
-    await expect(imageInfoOfBase64(invalidBase64)).rejects.toThrow();
+    await expect(imageInfoOfBase64(invalidBase64)).rejects.toThrow(
+      'Invalid image',
+    );
+  });
+
+  it('throws clear error for valid base64 that is not an image', async () => {
+    const nonImageBase64 = 'data:image/png;base64,Zm9v';
+
+    await expect(imageInfoOfBase64(nonImageBase64)).rejects.toThrow(
+      'Invalid image: unsupported format',
+    );
   });
 
   it('throws error for empty string', async () => {
-    await expect(imageInfoOfBase64('')).rejects.toThrow();
+    await expect(imageInfoOfBase64('')).rejects.toThrow(
+      'Invalid image: empty base64 data',
+    );
   });
 });
 
@@ -98,6 +113,121 @@ describe('image utils', () => {
     expect(resizedBase64).toContain(';base64,');
   });
 
+  it('compositePointMarkerImg keeps image dimensions and marks a point', async () => {
+    const image = getFixture('icon.png');
+    const base64 = localImg2Base64(image);
+
+    const markedBase64 = await compositePointMarkerImg({
+      inputImgBase64: base64,
+      point: { x: 20, y: 20 },
+    });
+
+    expect(markedBase64).toContain(';base64,');
+    expect(markedBase64).not.toBe(base64);
+
+    const originalInfo = await imageInfoOfBase64(base64);
+    const markedInfo = await imageInfoOfBase64(markedBase64);
+    expect(markedInfo).toEqual(originalInfo);
+  });
+
+  it('compositePointMarkerImg uses red target and blue locator callout markers without covering the target point', async () => {
+    const inputBuffer = await sharp({
+      create: {
+        width: 120,
+        height: 120,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const base64 = createImgBase64ByFormat(
+      'png',
+      inputBuffer.toString('base64'),
+    );
+
+    const markedBase64 = await compositePointMarkerImg({
+      inputImgBase64: base64,
+      point: { x: 60, y: 60 },
+    });
+    const locatorMarkedBase64 = await compositePointMarkerImg({
+      inputImgBase64: base64,
+      point: { x: 60, y: 60 },
+      indexId: 2,
+    });
+    const { body } = parseBase64(markedBase64);
+    const { data, info } = await sharp(Buffer.from(body, 'base64'))
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const locatorBody = parseBase64(locatorMarkedBase64).body;
+    const { data: locatorData, info: locatorInfo } = await sharp(
+      Buffer.from(locatorBody, 'base64'),
+    )
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let redDominantPixels = 0;
+    let blueCalloutPixels = 0;
+    const isRedMarkerPixel = (r: number, g: number, b: number) =>
+      r > 160 && g < 140 && b < 140;
+    for (let offset = 0; offset < data.length; offset += info.channels) {
+      const r = data[offset];
+      const g = data[offset + 1];
+      const b = data[offset + 2];
+      if (isRedMarkerPixel(r, g, b)) {
+        redDominantPixels += 1;
+      }
+      if (b > 180 && r < 100 && g > 80) {
+        blueCalloutPixels += 1;
+      }
+    }
+    let locatorBlueCalloutPixels = 0;
+    for (
+      let offset = 0;
+      offset < locatorData.length;
+      offset += locatorInfo.channels
+    ) {
+      const r = locatorData[offset];
+      const g = locatorData[offset + 1];
+      const b = locatorData[offset + 2];
+      if (b > 180 && r < 100 && g < 100) {
+        locatorBlueCalloutPixels += 1;
+      }
+    }
+
+    const targetPointOffset = (60 * info.width + 60) * info.channels;
+    const [targetR, targetG, targetB] = data.slice(
+      targetPointOffset,
+      targetPointOffset + 3,
+    );
+    const rightEdgeOffset = (60 * info.width + 90) * info.channels;
+    const lowerEdgeOffset = (75 * info.width + 60) * info.channels;
+    const circleBottomOffset = (90 * info.width + 60) * info.channels;
+    const [rightR, rightG, rightB] = data.slice(
+      rightEdgeOffset,
+      rightEdgeOffset + 3,
+    );
+    const [lowerR, lowerG, lowerB] = data.slice(
+      lowerEdgeOffset,
+      lowerEdgeOffset + 3,
+    );
+    const [circleBottomR, circleBottomG, circleBottomB] = data.slice(
+      circleBottomOffset,
+      circleBottomOffset + 3,
+    );
+    expect(targetR).toBeGreaterThan(245);
+    expect(targetG).toBeGreaterThan(245);
+    expect(targetB).toBeGreaterThan(245);
+    expect(isRedMarkerPixel(rightR, rightG, rightB)).toBe(true);
+    expect(isRedMarkerPixel(lowerR, lowerG, lowerB)).toBe(true);
+    expect(isRedMarkerPixel(circleBottomR, circleBottomG, circleBottomB)).toBe(
+      false,
+    );
+    expect(redDominantPixels).toBeGreaterThan(20);
+    expect(blueCalloutPixels).toBe(0);
+    expect(locatorBlueCalloutPixels).toBeGreaterThan(20);
+  });
+
   it('paddingToMatchBlockByBase64', async () => {
     const image = getFixture('heytea.jpeg');
     const base64 = localImg2Base64(image);
@@ -114,49 +244,15 @@ describe('image utils', () => {
     // console.log('tmpFile', tmpFile);
   });
 
-  it('cropByRect, with padding', async () => {
+  it('cropByRect', async () => {
     const image = getFixture('heytea.jpeg');
     const base64 = localImg2Base64(image);
-    const croppedBase64 = await cropByRect(
-      base64,
-      {
-        left: 200,
-        top: 80,
-        width: 100,
-        height: 400,
-      },
-      true,
-    );
-
-    expect(croppedBase64).toBeTruthy();
-
-    const info = await imageInfoOfBase64(croppedBase64.imageBase64);
-    // biome-ignore lint/style/noUnusedTemplateLiteral: by intention
-    expect(info.width).toMatchInlineSnapshot(`112`);
-    // biome-ignore lint/style/noUnusedTemplateLiteral: by intention
-    expect(info.height).toMatchInlineSnapshot(`420`);
-
-    const tmpFile = join(tmpdir(), 'heytea-cropped.jpeg');
-    await saveBase64Image({
-      base64Data: croppedBase64.imageBase64,
-      outputPath: tmpFile,
+    const croppedBase64 = await cropByRect(base64, {
+      left: 200,
+      top: 80,
+      width: 100,
+      height: 400,
     });
-    console.log('cropped image saved to', tmpFile);
-  });
-
-  it('cropByRect, without padding', async () => {
-    const image = getFixture('heytea.jpeg');
-    const base64 = localImg2Base64(image);
-    const croppedBase64 = await cropByRect(
-      base64,
-      {
-        left: 200,
-        top: 80,
-        width: 100,
-        height: 400,
-      },
-      false,
-    );
 
     expect(croppedBase64).toBeTruthy();
 
@@ -195,6 +291,50 @@ describe('image utils', () => {
     expect(isValid).toBe(false);
   });
 
+  it('validateScreenshotBuffer accepts valid screenshots above the minimum size', () => {
+    const buffer = readFileSync(getFixture('icon.png'));
+
+    expect(() =>
+      validateScreenshotBuffer(buffer, {
+        label: 'Screenshot',
+        minBufferSize: 8,
+      }),
+    ).not.toThrow();
+  });
+
+  it('validateScreenshotBuffer rejects empty screenshots', () => {
+    expect(() =>
+      validateScreenshotBuffer(Buffer.alloc(0), {
+        label: 'Screenshot',
+        minBufferSize: 0,
+      }),
+    ).toThrow('Screenshot validation failed: buffer size 0 bytes');
+  });
+
+  it('validateScreenshotBuffer rejects invalid image buffers', () => {
+    expect(() =>
+      validateScreenshotBuffer(Buffer.from('not-an-image'), {
+        label: 'Screenshot',
+        minBufferSize: 0,
+      }),
+    ).toThrow('Screenshot buffer has invalid image format');
+  });
+
+  it('validateScreenshotBuffer rejects screenshots below the configured size threshold', () => {
+    const buffer = readFileSync(getFixture('icon.png'));
+
+    expect(() =>
+      validateScreenshotBuffer(buffer, {
+        label: 'Screenshot',
+        minBufferSize: buffer.length + 1,
+      }),
+    ).toThrow(
+      `Screenshot validation failed: buffer size ${buffer.length} bytes (minimum: ${
+        buffer.length + 1
+      })`,
+    );
+  });
+
   it('httpImg2Base64', async () => {
     const mockResponse = Buffer.from('image-data');
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
@@ -222,6 +362,29 @@ describe('image utils', () => {
     );
   });
 
+  it('parseBase64 normalizes wrapped base64 bodies', () => {
+    const base64 =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA\r\nAu4AAAU2CAYAAADK1zMG';
+    const { mimeType, body } = parseBase64(base64);
+    expect(mimeType).toBe('image/png');
+    expect(body).toBe('iVBORw0KGgoAAAANSUhEUgAAAu4AAAU2CAYAAADK1zMG');
+  });
+
+  it('parseBase64 accepts raw jpeg base64 bodies', () => {
+    const base64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2w==';
+    const { mimeType, body } = parseBase64(base64);
+    expect(mimeType).toBe('image/jpeg');
+    expect(body).toBe(base64);
+  });
+
+  it('parseBase64 accepts raw png base64 bodies with wrapping', () => {
+    const base64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB\r\nCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+    const { mimeType, body } = parseBase64(base64);
+    expect(mimeType).toBe('image/png');
+    expect(body).toBe(base64.replace(/\s/g, ''));
+  });
+
   it('parseBase64, invalid', () => {
     const base64 = 'IamNotBase64';
     expect(() => parseBase64(base64)).toThrowError(
@@ -232,6 +395,11 @@ describe('image utils', () => {
   it('createImgBase64ByFormat', () => {
     const base64 = createImgBase64ByFormat('png', 'foo');
     expect(base64).toBe('data:image/png;base64,foo');
+  });
+
+  it('createImgBase64ByFormat strips WDA-style line wrapping', () => {
+    const base64 = createImgBase64ByFormat('png', 'abc\r\ndef ghi');
+    expect(base64).toBe('data:image/png;base64,abcdefghi');
   });
 
   // it(

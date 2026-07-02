@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { maskConfig } from '../../../src/env/helper';
-import type { IModelConfig } from '../../../src/env/model-config';
+import type { IModelConfig } from '../../../src/env/types';
 
 describe('maskConfig', () => {
   it('key will be masked', () => {
-    const config: IModelConfig = {
+    const config = {
       modelName: 'test-model',
-      from: 'env',
       openaiApiKey: 'sk-thisisafakekeythatislongenough',
       socksProxy: 'socks://proxy.example.com:1080',
       httpProxy: 'http://proxy.example.com:8080',
@@ -15,11 +14,12 @@ describe('maskConfig', () => {
       modelFamily: 'doubao-vision',
       modelDescription: '',
       intent: 'default',
-    };
+      slot: 'default',
+    } satisfies IModelConfig;
     expect(maskConfig(config)).toEqual({
-      from: 'env',
       httpProxy: 'http://proxy.example.com:8080',
       intent: 'default',
+      slot: 'default',
       modelDescription: '',
       modelName: 'test-model',
       openaiApiKey: 'sk-***************************ugh',

@@ -1,6 +1,8 @@
 import type {
   AndroidDeviceInputOpt,
   AndroidDeviceOpt,
+  HarmonyDeviceInputOpt,
+  HarmonyDeviceOpt,
   IOSDeviceInputOpt,
   IOSDeviceOpt,
 } from '@/device';
@@ -22,6 +24,7 @@ describe('Device Options Type Definitions', () => {
         usePhysicalDisplayIdForScreenshot: true,
         usePhysicalDisplayIdForDisplayLookup: true,
         screenshotResizeScale: 0.5,
+        minScreenshotBufferSize: 4096,
         alwaysRefreshScreenInfo: true,
         autoDismissKeyboard: true,
         keyboardDismissStrategy: 'esc-first',
@@ -53,8 +56,10 @@ describe('Device Options Type Definitions', () => {
     test('should include all required iOS device options', () => {
       const options: IOSDeviceOpt = {
         deviceId: '00008110-000123456789ABCD',
+        iOSDeviceClassOverride: '@private-package/ios',
         wdaPort: 8100,
         wdaHost: 'localhost',
+        sessionId: 'external-session-id',
         useWDA: true,
         autoDismissKeyboard: true,
       };
@@ -71,9 +76,39 @@ describe('Device Options Type Definitions', () => {
       expect(options).toBeDefined();
     });
 
+    test('should allow documented iOS device override option name', () => {
+      const options: IOSDeviceOpt = {
+        iOSDeviceClassOverride: '@private-package/ios',
+      };
+
+      expect(options).toBeDefined();
+    });
+
     test('IOSDeviceInputOpt should include keyboard options', () => {
       const inputOptions: IOSDeviceInputOpt = {
         autoDismissKeyboard: true,
+      };
+
+      expect(inputOptions).toBeDefined();
+    });
+  });
+
+  describe('HarmonyDeviceOpt', () => {
+    test('should include all required HarmonyOS device options', () => {
+      const options: HarmonyDeviceOpt = {
+        hdcPath: '/custom/path/to/hdc',
+        autoDismissKeyboard: true,
+        keyboardDismissStrategy: 'esc-first',
+        screenshotResizeScale: 0.5,
+      };
+
+      expect(options).toBeDefined();
+    });
+
+    test('HarmonyDeviceInputOpt should include keyboard options', () => {
+      const inputOptions: HarmonyDeviceInputOpt = {
+        autoDismissKeyboard: true,
+        keyboardDismissStrategy: 'back-first',
       };
 
       expect(inputOptions).toBeDefined();
@@ -93,6 +128,7 @@ describe('Device Options Type Definitions', () => {
         usePhysicalDisplayIdForScreenshot: true,
         usePhysicalDisplayIdForDisplayLookup: true,
         screenshotResizeScale: 0.5,
+        minScreenshotBufferSize: 4096,
         alwaysRefreshScreenInfo: true,
         autoDismissKeyboard: true,
         keyboardDismissStrategy: 'esc-first',
@@ -105,8 +141,8 @@ describe('Device Options Type Definitions', () => {
         unstableLogContent: true,
       };
 
-      // @ts-expect-error - customActions should not be allowed in YAML config
       const invalidConfig: MidsceneYamlScriptAndroidEnv = {
+        // @ts-expect-error - customActions should not be allowed in YAML config
         customActions: [],
       };
 
@@ -118,8 +154,10 @@ describe('Device Options Type Definitions', () => {
       const yamlConfig: MidsceneYamlScriptIOSEnv = {
         // From IOSDeviceOpt
         deviceId: '00008110-000123456789ABCD',
+        iOSDeviceClassOverride: '@private-package/ios',
         wdaPort: 8100,
         wdaHost: 'localhost',
+        sessionId: 'external-session-id',
         useWDA: true,
         autoDismissKeyboard: true,
 
@@ -131,8 +169,8 @@ describe('Device Options Type Definitions', () => {
         unstableLogContent: true,
       };
 
-      // @ts-expect-error - customActions should not be allowed in YAML config
       const invalidConfig: MidsceneYamlScriptIOSEnv = {
+        // @ts-expect-error - customActions should not be allowed in YAML config
         customActions: [],
       };
 
@@ -223,6 +261,13 @@ describe('Device Options Type Definitions', () => {
 
       validStrategies.forEach((strategy) => {
         const options: AndroidDeviceOpt = {
+          keyboardDismissStrategy: strategy,
+        };
+        expect(options).toBeDefined();
+      });
+
+      validStrategies.forEach((strategy) => {
+        const options: HarmonyDeviceOpt = {
           keyboardDismissStrategy: strategy,
         };
         expect(options).toBeDefined();

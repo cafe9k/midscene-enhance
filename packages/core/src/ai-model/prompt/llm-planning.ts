@@ -1,20 +1,58 @@
 import { findAllMidsceneLocatorField } from '@/common';
 import type { DeviceAction } from '@/types';
-import type { TModelFamily } from '@midscene/shared/env';
 import { getPreferredLanguage } from '@midscene/shared/env';
 import {
   getZodDescription,
   getZodTypeName,
 } from '@midscene/shared/zod-schema-utils';
 import type { z } from 'zod';
-import { bboxDescription } from './common';
+import { planningModelFamilyRequiredForLocateMessage } from '../errors';
+import type { LocateResultPromptSpec } from '../shared/model-locate-result';
+import { locateGroundingRules } from './locate-grounding-rules';
+import { locateParamExample } from './locate-param-example';
 
-const vlLocateParam = (modelFamily: TModelFamily | undefined) => {
-  if (modelFamily) {
-    return `{bbox: [number, number, number, number], prompt: string } // ${bboxDescription(modelFamily)}`;
+const locateParamSchemaDescription = (promptSpec?: LocateResultPromptSpec) => {
+  if (promptSpec) {
+    return `{${promptSpec.resultKey}: ${promptSpec.resultValueSchema}, prompt: string } // ${promptSpec.resultValueDescription}`;
   }
   return '{ prompt: string /* description of the target element */ }';
 };
+
+const OBSERVE_STEP_NOTES = [
+  '### Observation Guidelines',
+  '',
+  '- Treat visible summaries, thumbnails, cropped content, and partially visible lists as potentially incomplete when the task depends on precise details.',
+  '- If the current view does not provide enough information to decide safely, use available UI affordances such as opening details, expanding content, previewing, enlarging, zooming, or scrolling before acting.',
+].join('\n');
+
+const MEMORY_STEP_NOTES = [
+  'Use `<memory>` to record clear, task-relevant information from the current screenshot that may be needed in later steps. The current screenshot will not be available later, so memory should preserve enough detail for future reasoning, verification, or action.',
+  '',
+  '- Record information completely and exactly as shown. Do not summarize, translate, normalize, or merge values that may matter later.',
+  '- When recording an item, include the item itself, its exact task-relevant details, and the visible cue or UI context that identifies where it came from when relevant.',
+  '- Keep similar or repeated items as separate memory entries unless their task-relevant details are confirmed to be the same.',
+  '- After navigation, scrolling, editing, deletion, saving, or other screen changes, treat remembered positions, order, indexes, and UI bindings as references only. Re-check the current screen before acting on them.',
+  '',
+  'Examples:',
+  '- If you need to find an item and later assert its details, record the item name and the exact details needed for the assertion, such as status, price, date, owner, description, or other visible fields.',
+  '- If you need to compare multiple similar results, record each candidate separately with its exact distinguishing details and visible context.',
+  '- If you need to copy information from one place to another, record the exact source value and the target field or UI cue it should be mapped to.',
+].join('\n');
+
+const RUN_ADB_SHELL_ACTION_GUIDANCE =
+  "- If the user's task can be completed with the RunAdbShell action, prefer using the RunAdbShell action.";
+
+const buildActionStepNotes = (actionList: string) =>
+  [
+    '### Action Guidelines',
+    '',
+    ...(actionList.includes('RunAdbShell')
+      ? [RUN_ADB_SHELL_ACTION_GUIDANCE]
+      : []),
+    '- For touch continuous controls that set a value along a track, such as a slider, prefer Swipe from the current handle or filled position to the requested track endpoint instead of tapping the endpoint.',
+    '- When editing existing text in a UI field, preserve all existing text by moving the cursor and typing/deleting the minimal necessary characters.',
+    '- For insert/prepend/append edits, use CursorMove when the caret must be adjusted precisely, then use Input with mode "typeOnly" for inserted characters and KeyboardPress for newlines or deletion. If the caret lands in the wrong position, recover with CursorMove, KeyboardPress, or undo and retry cursor placement; do not switch to replace as a fallback for cursor placement failures.',
+  ].join('\n');
 
 /**
  * Find ZodDefault in the wrapper chain and return its default value
@@ -54,25 +92,19 @@ const findDefaultValue = (field: unknown): any | undefined => {
 };
 
 /**
- * Inject bbox into locate fields of a sample object.
+ * Inject model locate results into locate fields of a sample object.
  * Walks the sample and for any locate field (identified by paramSchema),
- * adds a fake bbox array when includeBbox is true.
+ * adds a fake locate result when includeLocateInPlanning is true.
  */
-const SAMPLE_BBOXES: [number, number, number, number][] = [
-  [50, 100, 200, 200],
-  [300, 400, 500, 500],
-  [600, 100, 800, 250],
-  [50, 600, 250, 750],
-];
-
-const injectBboxIntoSample = (
+const injectLocateResultIntoSample = (
   sample: Record<string, any>,
   locateFields: string[],
-  includeBbox: boolean,
+  promptSpec: LocateResultPromptSpec,
 ): Record<string, any> => {
-  if (!includeBbox) return sample;
+  const resultKey = promptSpec.resultKey;
+  const sampleResults = promptSpec.exampleValues;
   const result = { ...sample };
-  let bboxIndex = 0;
+  let sampleResultIndex = 0;
   for (const field of locateFields) {
     if (
       result[field] &&
@@ -81,9 +113,9 @@ const injectBboxIntoSample = (
     ) {
       result[field] = {
         ...result[field],
-        bbox: SAMPLE_BBOXES[bboxIndex % SAMPLE_BBOXES.length],
+        [resultKey]: sampleResults[sampleResultIndex % sampleResults.length],
       };
-      bboxIndex++;
+      sampleResultIndex++;
     }
   }
   return result;
@@ -91,8 +123,9 @@ const injectBboxIntoSample = (
 
 export const descriptionForAction = (
   action: DeviceAction<any>,
-  locatorSchemaTypeDescription: string,
-  includeBbox = false,
+  locateParamTypeDescription: string,
+  includeLocateInPlanning = false,
+  locatePromptSpec?: LocateResultPromptSpec,
 ) => {
   const tab = '  ';
   const fields: string[] = [];
@@ -125,7 +158,7 @@ export const descriptionForAction = (
           const keyWithOptional = isOptional ? `${key}?` : key;
 
           // Get the type name using extracted helper
-          const typeName = getZodTypeName(field, locatorSchemaTypeDescription);
+          const typeName = getZodTypeName(field, locateParamTypeDescription);
 
           // Get description using extracted helper
           const description = getZodDescription(field as z.ZodTypeAny);
@@ -181,12 +214,15 @@ export const descriptionForAction = (
   // Render sample if provided, using the same XML tag format as the real output
   if (action.sample && typeof action.sample === 'object') {
     const locateFields = findAllMidsceneLocatorField(action.paramSchema);
-    const sampleWithBbox = injectBboxIntoSample(
-      action.sample,
-      locateFields,
-      includeBbox,
-    );
-    const sampleStr = `- sample:\n${tab}${tab}<action-type>${action.name}</action-type>\n${tab}${tab}<action-param-json>\n${tab}${tab}${JSON.stringify(sampleWithBbox, null, 2).replace(/\n/g, `\n${tab}${tab}`)}\n${tab}${tab}</action-param-json>`;
+    const sampleWithLocateResult =
+      includeLocateInPlanning && locatePromptSpec
+        ? injectLocateResultIntoSample(
+            action.sample,
+            locateFields,
+            locatePromptSpec,
+          )
+        : action.sample;
+    const sampleStr = `- sample:\n${tab}${tab}<action-type>${action.name}</action-type>\n${tab}${tab}<action-param-json>\n${tab}${tab}${JSON.stringify(sampleWithLocateResult, null, 2).replace(/\n/g, `\n${tab}${tab}`)}\n${tab}${tab}</action-param-json>`;
     fields.push(sampleStr);
   }
 
@@ -197,66 +233,58 @@ ${tab}${fields.join(`\n${tab}`)}
 
 export async function systemPromptToTaskPlanning({
   actionSpace,
-  modelFamily,
-  includeBbox,
+  locatePromptSpec,
+  includeLocateInPlanning,
   includeThought,
   includeSubGoals,
 }: {
   actionSpace: DeviceAction<any>[];
-  modelFamily: TModelFamily | undefined;
-  includeBbox: boolean;
+  locatePromptSpec?: LocateResultPromptSpec;
+  includeLocateInPlanning: boolean;
   includeThought?: boolean;
   includeSubGoals?: boolean;
 }) {
   const preferredLanguage = getPreferredLanguage();
 
-  // Validate parameters: if includeBbox is true, modelFamily must be defined
-  if (includeBbox && !modelFamily) {
-    throw new Error(
-      'modelFamily cannot be undefined when includeBbox is true. A valid modelFamily is required for bbox-based location.',
-    );
+  if (includeLocateInPlanning && !locatePromptSpec) {
+    throw new Error(planningModelFamilyRequiredForLocateMessage());
   }
 
   const actionDescriptionList = actionSpace.map((action) => {
     return descriptionForAction(
       action,
-      vlLocateParam(includeBbox ? modelFamily : undefined),
-      includeBbox,
+      locateParamSchemaDescription(
+        includeLocateInPlanning ? locatePromptSpec : undefined,
+      ),
+      includeLocateInPlanning,
+      locatePromptSpec,
     );
   });
   const actionList = actionDescriptionList.join('\n');
+  const actionStepNotes = buildActionStepNotes(actionList);
 
   const shouldIncludeThought = includeThought ?? true;
   const shouldIncludeSubGoals = includeSubGoals ?? false;
 
-  // Generate locate object examples based on includeBbox
-  const locateExample1 = includeBbox
-    ? `{
-    "prompt": "Add to cart button for Sauce Labs Backpack",
-    "bbox": [345, 442, 458, 483]
-  }`
-    : `{
-    "prompt": "Add to cart button for Sauce Labs Backpack"
-  }`;
-
-  // Locate examples for multi-turn conversation
-  const locateNameField = includeBbox
-    ? `{
-    "prompt": "Name input field in the registration form",
-    "bbox": [120, 180, 380, 210]
-  }`
-    : `{
-    "prompt": "Name input field in the registration form"
-  }`;
-
-  const locateEmailField = includeBbox
-    ? `{
-    "prompt": "Email input field in the registration form",
-    "bbox": [120, 240, 380, 270]
-  }`
-    : `{
-    "prompt": "Email input field in the registration form"
-  }`;
+  const locateExample = (prompt: string, exampleValueIndex: number) =>
+    locateParamExample(
+      prompt,
+      includeLocateInPlanning ? locatePromptSpec : undefined,
+      locatePromptSpec?.exampleValues[exampleValueIndex] ??
+        locatePromptSpec?.exampleValues[0],
+    );
+  const locateExample1 = locateExample(
+    'Add to cart button for Sauce Labs Backpack',
+    1,
+  );
+  const locateNameField = locateExample(
+    'Name input field in the registration form',
+    2,
+  );
+  const locateEmailField = locateExample(
+    'Email input field in the registration form',
+    3,
+  );
 
   const thoughtTag = (content: string) =>
     shouldIncludeThought ? `<thought>${content}</thought>\n` : '';
@@ -355,7 +383,7 @@ Target: You are an expert to manipulate the UI to accomplish the user's instruct
 ${step1Title}
 
 ${step1Description}
-
+${shouldIncludeSubGoals ? `\n${OBSERVE_STEP_NOTES}\n` : ''}
 * <thought> tag (REQUIRED)
 
 ${thoughtTagDescription}
@@ -365,7 +393,7 @@ ${
     ? `
 ## Step ${memoryStepNumber}: Memory Data from Current Screenshot (related tags: <memory>)
 
-While observing the current screenshot, if you notice any information that might be needed in follow-up actions, record it here. The current screenshot will NOT be available in subsequent steps, so this memory is your only way to preserve essential information. Examples: extracted data, element states, content that needs to be referenced.
+${MEMORY_STEP_NOTES}
 
 Don't use this tag if no information needs to be preserved.
 `
@@ -393,6 +421,18 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 - "type 'hello' in the search box" → ${shouldIncludeSubGoals ? 'Goal accomplished' : 'Instruction fulfilled'} when 'hello' is typed. Do NOT press Enter or trigger search.
 - "select the first item" → ${shouldIncludeSubGoals ? 'Goal accomplished' : 'Instruction fulfilled'} when selected. Do NOT proceed to checkout.
 
+**Change completion:**
+- If the requested outcome is a durable change, such as create, edit, update, delete, save, send, submit, apply, or publish, do not stop at an unsaved draft, open editor, temporary input, transient selection, or staged value. Continue through the app/page's normal completion control such as Save, Done, Confirm, OK, Submit, Apply, Send, or Publish before completing, so the result remains after leaving the screen.
+- If the user only asks for an intermediate UI state, such as typing text, selecting an option, filling fields, or opening a screen without saving/submitting/applying, stop once that exact state is reached.
+
+**Special case - Scrollable option lists and dropdowns:**
+- When choosing an item from a scrollable select, dropdown, listbox, menu, or similar option list, first open the control if it is closed. Once the list is open, interact with the list itself, not the page.
+- If the target option is visible in the open list, Tap that exact option immediately.
+- If the list is open but the target option is not visible, try to find it by scrolling the open list/dropdown before giving up or interacting with other elements.
+- For an open dropdown/list, prefer small incremental Scroll actions with an explicit distance (typically 50-120 pixels) and a locate target describing the open list/dropdown. Do NOT omit distance while searching within a list, because the default scroll distance can skip over relevant options and cause oscillation.
+- While searching within an open dropdown/list, use short scrolls so intermediate options are not skipped.
+- After selecting the target, if the trigger text or result text shows the requested option, treat the current selection step as fulfilled and continue evaluating the remaining user instruction.
+
 **Special case - Text hidden by a narrow input field:**
 - CRITICAL PRIORITY OVERRIDE - Input verification after an input action:
 - This rule overrides the general requirement to verify the exact target text from the screenshot.
@@ -406,6 +446,16 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 **Special case - Assertion instructions:**
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark ${shouldIncludeSubGoals ? 'the goal' : 'it'} as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
+
+### Completion Criteria for Process-required Instructions
+
+If the user's instruction includes explicit operation steps, ordering requirements, or action requirements, it is a process-required instruction.
+
+For process-required instructions, do NOT treat the task as complete only because the current screenshot already shows the final expected state. Do NOT infer that earlier steps were executed from the final UI state.
+
+You may output <complete success="true"> only when the current execution history, previous logs, or the screenshot after the most recent action proves that every explicit step required by the user has been completed, and the final check condition is also satisfied.
+
+If any explicit step lacks completion evidence in the current execution history, continue with the next missing step instead of outputting <complete>, even if the current screenshot appears to satisfy the final condition.
 ${
   !shouldIncludeSubGoals
     ? `
@@ -420,7 +470,7 @@ ${
 
 - If the task is NOT complete, skip this section and continue to Step ${actionStepNumber}.
 - Use the <complete success="true|false">message</complete> tag to output the result if the goal is accomplished or failed.
-  - the 'success' attribute is required. ${shouldIncludeSubGoals ? 'It means whether the expected goal is accomplished based on what you observe in the current screenshot. ' : ''}No matter what actions were executed or what errors occurred during execution, if the ${shouldIncludeSubGoals ? 'expected goal is accomplished' : 'instruction is fulfilled'}, set success="true". If the ${shouldIncludeSubGoals ? 'expected goal is not accomplished and cannot be accomplished' : 'instruction is not fulfilled and cannot be fulfilled'}, set success="false".
+  - the 'success' attribute is required. ${shouldIncludeSubGoals ? 'It means whether the expected goal is accomplished based on what you observe in the current screenshot and the current execution history. ' : ''}No matter what errors occurred during execution, set success="true" only when the current execution history shows that all steps required by the user have been completed and the final state satisfies the requirement. If the user asks for explicit operation steps or an ordered workflow, do not treat those steps as completed only because the current screenshot already shows the final expected state. If the ${shouldIncludeSubGoals ? 'expected goal is not accomplished and cannot be accomplished' : 'instruction is not fulfilled and cannot be fulfilled'}, set success="false".
   - the 'message' is the information that will be provided to the user. If the user asks for a specific format, strictly follow that.
 - If you output <complete>, do NOT output <action-type> or <action-param-json>. The task ends here.
 
@@ -434,7 +484,15 @@ ONLY if the task is not complete: Think what the next action is according to the
 - Give just the next ONE action you should do (if any)
 - If there are some error messages reported by the previous actions, don't give up, try parse a new action to recover. If the error persists for more than 3 times, you should think this is an error and set the "error" field to the error message.
 
-### Supporting actions list
+${actionStepNotes}
+
+${
+  includeLocateInPlanning
+    ? `${locateGroundingRules()}
+
+`
+    : ''
+}### Supporting actions list
 
 ${actionList}
 

@@ -4,27 +4,34 @@ import Icon, {
   ArrowDownOutlined,
   UpOutlined,
 } from '@ant-design/icons';
-import { Alert, Button, Form, List, Typography, message } from 'antd';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Form, List, Typography } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePlaygroundExecution } from '../../hooks/usePlaygroundExecution';
 import { usePlaygroundState } from '../../hooks/usePlaygroundState';
 import { useEnvConfig } from '../../store/store';
 import type { FormValue, UniversalPlaygroundProps } from '../../types';
+import { notifyError } from '../../utils';
 import { ContextPreview } from '../context-preview';
 import { EnvConfigReminder } from '../env-config-reminder';
 import { PlaygroundResultView } from '../playground-result';
 import './index.less';
 import PlaygroundIcon from '../../icons/avatar.svg';
 import { defaultMainButtons } from '../../utils/constants';
+import { calculateEmptyStatePromptScrollTop } from '../../utils/empty-state-scroll';
 import { resolveProgressActionIcon } from '../../utils/progress-action-icon';
+import { shouldOffsetEmptyStateForPromptInput } from '../../utils/prompt-input-utils';
 import { PromptInput } from '../prompt-input';
 import ShinyText from '../shiny-text';
+import { shouldRenderCustomEmptyState } from './empty-state';
+import { shouldExecuteExternalRunRequest } from './external-run';
 import {
   createStorageProvider,
   detectBestStorageType,
 } from './providers/storage-provider';
 
 const { Text } = Typography;
+const handledExternalRunRequestIds = new Set<string>();
+const MAX_HANDLED_EXTERNAL_RUN_REQUEST_IDS = 100;
 
 // Function to get stable ID for SDK (adapter-driven)
 function getSDKId(sdk: any): string {
@@ -66,13 +73,7 @@ export function UniversalPlayground({
   const [form] = Form.useForm();
   const { config } = useEnvConfig();
   const [sdkReady, setSdkReady] = useState(false);
-
-  // Initialize form with default type on mount
-  useEffect(() => {
-    form.setFieldsValue({
-      type: defaultMainButtons[0],
-    });
-  }, [form]);
+  const lastExternalRunRequestIdRef = useRef<string | null>(null);
 
   // Initialize SDK ID on mount for remote execution
   useEffect(() => {
@@ -99,6 +100,10 @@ export function UniversalPlayground({
   // Use custom hooks for state management
   // Determine the storage provider based on configuration
   const effectiveStorage = useMemo(() => {
+    if (componentConfig.persistMessages === false) {
+      return null;
+    }
+
     // If external storage is provided, use it
     if (storage) {
       return storage;
@@ -119,7 +124,13 @@ export function UniversalPlayground({
     console.log(`Using ${bestStorageType} storage for namespace: ${namespace}`);
 
     return createStorageProvider(bestStorageType, namespace);
-  }, [storage, sdkReady, componentConfig.storageNamespace, playgroundSDK]);
+  }, [
+    storage,
+    sdkReady,
+    componentConfig.storageNamespace,
+    componentConfig.persistMessages,
+    playgroundSDK,
+  ]);
 
   const {
     loading,
@@ -134,6 +145,7 @@ export function UniversalPlayground({
     verticalMode,
     replayCounter,
     setReplayCounter,
+    messagesInitialized,
     infoListRef,
     currentRunningIdRef,
     interruptedFlagRef,
@@ -144,6 +156,8 @@ export function UniversalPlayground({
     effectiveStorage,
     contextProvider,
     branding.targetName,
+    componentConfig.persistMessages !== false &&
+      !componentConfig.storageNamespace,
   );
 
   // Use execution hook
@@ -173,8 +187,7 @@ export function UniversalPlayground({
     if (playgroundSDK?.overrideConfig && config) {
       playgroundSDK.overrideConfig(config).catch((error) => {
         console.error('Failed to override SDK config:', error);
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        message.error(`Failed to apply AI configuration: ${errorMsg}`);
+        notifyError(error, { title: 'Failed to apply AI configuration' });
       });
     }
   }, [playgroundSDK, config]);
@@ -184,10 +197,51 @@ export function UniversalPlayground({
     try {
       const value = form.getFieldsValue() as FormValue;
       await executeAction(value);
-    } catch (error: any) {
-      message.error(error?.message || 'Execution failed');
+    } catch (error) {
+      notifyError(error, { title: 'Execution failed' });
     }
   }, [form, executeAction]);
+
+  useEffect(() => {
+    const request = componentConfig.externalRunRequest;
+    if (
+      !request ||
+      !shouldExecuteExternalRunRequest({
+        request,
+        handledRequestIds: handledExternalRunRequestIds,
+        lastRequestId: lastExternalRunRequestIdRef.current,
+        sdkReady,
+        messagesInitialized,
+      })
+    ) {
+      return;
+    }
+    lastExternalRunRequestIdRef.current = request.id;
+    handledExternalRunRequestIds.add(request.id);
+    if (
+      handledExternalRunRequestIds.size > MAX_HANDLED_EXTERNAL_RUN_REQUEST_IDS
+    ) {
+      const oldestRequestId = handledExternalRunRequestIds
+        .values()
+        .next().value;
+      if (oldestRequestId) {
+        handledExternalRunRequestIds.delete(oldestRequestId);
+      }
+    }
+    executeAction(request.value, {
+      displayContent: request.displayContent,
+      ...(request.reportDisplay
+        ? { reportDisplay: request.reportDisplay }
+        : {}),
+    }).catch((error) => {
+      notifyError(error, { title: 'Execution failed' });
+    });
+  }, [
+    componentConfig.externalRunRequest,
+    executeAction,
+    messagesInitialized,
+    sdkReady,
+  ]);
 
   // Check if run button should be enabled
   const configAlreadySet = Object.keys(config || {}).length >= 1;
@@ -201,7 +255,7 @@ export function UniversalPlayground({
   // one-frame window where downstream consumers (e.g. PromptInput minimal
   // chrome) observe an empty type and run type-sync effects unnecessarily.
   const watchedType = Form.useWatch('type', form);
-  const selectedType = watchedType || form.getFieldValue('type');
+  const selectedType = watchedType || defaultMainButtons[0];
 
   // Determine service mode based on SDK adapter type
   const serviceMode = useMemo(() => {
@@ -248,7 +302,9 @@ export function UniversalPlayground({
     const firstIds = new Set<string>();
     const visible: typeof infoList = [];
     let currentGroupFirstId: string | null = null;
+    const hideWelcome = infoList.length > 1;
     for (const item of infoList) {
+      if (hideWelcome && item.id === 'welcome') continue;
       if (item.type === 'progress') {
         if (currentGroupFirstId === null) {
           currentGroupFirstId = item.id;
@@ -281,10 +337,91 @@ export function UniversalPlayground({
     }
     return null;
   }, [infoList]);
+  const renderCustomEmptyState = shouldRenderCustomEmptyState(
+    visibleInfoList,
+    componentConfig.emptyState,
+  );
+  const shouldOffsetEmptyStateForPrompt = useMemo(
+    () =>
+      renderCustomEmptyState &&
+      shouldOffsetEmptyStateForPromptInput(actionSpace, selectedType),
+    [actionSpace, renderCustomEmptyState, selectedType],
+  );
+
+  useEffect(() => {
+    if (!shouldOffsetEmptyStateForPrompt) {
+      return;
+    }
+
+    const adjustEmptyStateScroll = () => {
+      const container = infoListRef.current;
+      if (!container) {
+        return;
+      }
+
+      const wrapper = container.querySelector(
+        '.playground-empty-state-wrapper',
+      );
+      const contentStart = wrapper?.querySelector(
+        '[data-playground-empty-state-content-start]',
+      );
+      const contentEnd = wrapper?.querySelector(
+        '[data-playground-empty-state-content-end]',
+      );
+      if (
+        !(contentStart instanceof HTMLElement) ||
+        !(contentEnd instanceof HTMLElement)
+      ) {
+        return;
+      }
+
+      const containerRect = container.getBoundingClientRect();
+      const startRect = contentStart.getBoundingClientRect();
+      const endRect = contentEnd.getBoundingClientRect();
+      const top = calculateEmptyStatePromptScrollTop({
+        currentScrollTop: container.scrollTop,
+        maxScrollTop: Math.max(
+          0,
+          container.scrollHeight - container.clientHeight,
+        ),
+        containerTop: containerRect.top,
+        containerBottom: containerRect.bottom,
+        contentStartTop: startRect.top,
+        contentEndBottom: endRect.bottom,
+      });
+      container.scrollTo({
+        top,
+        behavior: 'auto',
+      });
+    };
+
+    const animationFrameId = window.requestAnimationFrame(
+      adjustEmptyStateScroll,
+    );
+    const timeoutId = window.setTimeout(adjustEmptyStateScroll, 160);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [infoListRef, selectedType, shouldOffsetEmptyStateForPrompt]);
+  const emptyStateWrapperClassName = [
+    'playground-empty-state-wrapper',
+    shouldOffsetEmptyStateForPrompt
+      ? 'playground-empty-state-wrapper-offset-for-prompt'
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <div className={`playground-container ${layout}-mode ${className}`.trim()}>
-      <Form form={form} onFinish={handleFormRun} className="command-form">
+      <Form
+        form={form}
+        onFinish={handleFormRun}
+        className="command-form"
+        initialValues={{ type: defaultMainButtons[0] }}
+      >
         {/* Context Preview Section */}
         {finalShowContextPreview && (
           <div className="context-preview-section">
@@ -313,154 +450,184 @@ export function UniversalPlayground({
 
           {/* Info List */}
           <div ref={infoListRef} className="info-list-container">
-            <List
-              itemLayout="vertical"
-              dataSource={visibleInfoList}
-              renderItem={(item) => (
-                <List.Item key={item.id} className="list-item">
-                  {collapsibleProgressGroup &&
-                  firstInProgressGroup.has(item.id) ? (
-                    <button
-                      type="button"
-                      className={`progress-group-toggle ${
-                        collapsedProgressGroups.has(item.id)
-                          ? 'is-collapsed'
-                          : 'is-expanded'
-                      }`}
-                      aria-expanded={!collapsedProgressGroups.has(item.id)}
-                      onClick={() => toggleProgressGroup(item.id)}
-                    >
-                      <span className="progress-group-toggle-label">
-                        {progressGroupLabel}
-                      </span>
-                      <UpOutlined className="progress-group-toggle-chevron" />
-                    </button>
-                  ) : null}
-                  {/* User Message */}
-                  {item.type === 'user' ? (
-                    <div className="user-message-container">
-                      <div className="user-message-bubble">{item.content}</div>
-                    </div>
-                  ) : item.type === 'progress' ? (
-                    /* Progress Message */
-                    <div>
-                      {(() => {
-                        const parts = item.content.split(' - ');
-                        const action = parts[0]?.trim();
-                        const description = parts.slice(1).join(' - ').trim();
-
-                        const isLatestProgress = item.id === latestProgressId;
-                        const shouldShowLoading = loading && isLatestProgress;
-
-                        const state: 'loading' | 'error' | 'completed' =
-                          shouldShowLoading
-                            ? 'loading'
-                            : item.result?.error
-                              ? 'error'
-                              : 'completed';
-                        const domainIcon =
-                          state === 'completed'
-                            ? resolveProgressActionIcon(
-                                item.actionKind,
-                                executionFlowConfig.resolveActionIcon,
-                              )
-                            : null;
-                        return (
-                          <>
-                            {action && (
-                              <span className="progress-action-item">
-                                {action}
-                                <span
-                                  className={`progress-status-icon ${state}`}
-                                >
-                                  {state === 'loading' ? (
-                                    <LoadingOutlined spin />
-                                  ) : state === 'error' ? (
-                                    '✗'
-                                  ) : domainIcon !== null ? (
-                                    domainIcon
-                                  ) : (
-                                    '✓'
-                                  )}
-                                </span>
-                              </span>
-                            )}
-                            {description && (
-                              <div>
-                                <ShinyText
-                                  text={description}
-                                  className="progress-description"
-                                  disabled={!shouldShowLoading}
-                                />
-                              </div>
-                            )}
-                            {item.result?.error && (
-                              <ErrorMessage error={item.result.error} />
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  ) : item.type === 'separator' ? (
-                    /* Separator Message */
-                    <div className="new-conversation-separator">
-                      <div className="separator-line" />
-                      <div className="separator-text-container">
-                        <Text type="secondary" className="separator-text">
-                          {item.content}
-                        </Text>
-                      </div>
-                    </div>
-                  ) : (
-                    /* System Message */
-                    <div className="system-message-container">
-                      {componentConfig.showSystemMessageHeader !== false && (
-                        <div className="system-message-header">
-                          <Icon
-                            component={branding.icon || PlaygroundIcon}
-                            style={{ fontSize: 20 }}
-                          />
-                          <span className="system-message-title">
-                            {branding.title || 'Playground'}
+            {renderCustomEmptyState ? (
+              <div className={emptyStateWrapperClassName}>
+                {componentConfig.emptyState}
+              </div>
+            ) : (
+              <List
+                itemLayout="vertical"
+                dataSource={visibleInfoList}
+                renderItem={(item) => {
+                  const isFirstInProgressGroup =
+                    collapsibleProgressGroup &&
+                    firstInProgressGroup.has(item.id);
+                  const isCollapsedHeader =
+                    isFirstInProgressGroup &&
+                    collapsedProgressGroups.has(item.id);
+                  return (
+                    <List.Item key={item.id} className="list-item">
+                      {isFirstInProgressGroup ? (
+                        <button
+                          type="button"
+                          className={`progress-group-toggle ${
+                            collapsedProgressGroups.has(item.id)
+                              ? 'is-collapsed'
+                              : 'is-expanded'
+                          }`}
+                          aria-expanded={!collapsedProgressGroups.has(item.id)}
+                          onClick={() => toggleProgressGroup(item.id)}
+                        >
+                          <span className="progress-group-toggle-label">
+                            {progressGroupLabel}
                           </span>
+                          <UpOutlined className="progress-group-toggle-chevron" />
+                        </button>
+                      ) : null}
+                      {isCollapsedHeader ? null : /* User Message */
+                      item.type === 'user' ? (
+                        <div className="user-message-container">
+                          <div className="user-message-bubble">
+                            {item.content}
+                          </div>
                         </div>
-                      )}
-                      {(item.content || item.result) && (
-                        <div className="system-message-content">
-                          {item.type === 'result' ? (
-                            <PlaygroundResultView
-                              result={item.result || null}
-                              loading={item.loading || false}
-                              serverValid={true}
-                              serviceMode={serviceMode}
-                              replayScriptsInfo={item.replayScriptsInfo || null}
-                              replayCounter={item.replayCounter || 0}
-                              loadingProgressText={
-                                item.loadingProgressText || ''
-                              }
-                              verticalMode={item.verticalMode || false}
-                              fitMode="width"
-                              actionType={item.actionType}
-                            />
-                          ) : (
-                            <>
-                              <div className="system-message-text">
-                                {item.content}
-                              </div>
-                              {item.loading && item.loadingProgressText && (
-                                <div className="loading-progress-text">
-                                  <span>{item.loadingProgressText}</span>
+                      ) : item.type === 'progress' ? (
+                        /* Progress Message */
+                        <div>
+                          {(() => {
+                            const parts = item.content.split(' - ');
+                            const action = parts[0]?.trim();
+                            const description = parts
+                              .slice(1)
+                              .join(' - ')
+                              .trim();
+
+                            const isLatestProgress =
+                              item.id === latestProgressId;
+                            const shouldShowLoading =
+                              loading && isLatestProgress;
+
+                            const state: 'loading' | 'error' | 'completed' =
+                              shouldShowLoading
+                                ? 'loading'
+                                : item.result?.error
+                                  ? 'error'
+                                  : 'completed';
+                            const domainIcon =
+                              state === 'completed'
+                                ? resolveProgressActionIcon(
+                                    item.actionKind,
+                                    executionFlowConfig.resolveActionIcon,
+                                  )
+                                : null;
+                            return (
+                              <div className="progress-row">
+                                {action ? (
+                                  <span
+                                    className={`progress-status-icon ${state}`}
+                                  >
+                                    {state === 'loading' ? (
+                                      <LoadingOutlined spin />
+                                    ) : state === 'error' ? (
+                                      '✗'
+                                    ) : domainIcon !== null ? (
+                                      domainIcon
+                                    ) : (
+                                      '✓'
+                                    )}
+                                  </span>
+                                ) : null}
+                                <div className="progress-row-content">
+                                  {action ? (
+                                    <span className="progress-action-item">
+                                      {action}
+                                    </span>
+                                  ) : null}
+                                  {description ? (
+                                    <div className="progress-description-wrap">
+                                      <ShinyText
+                                        text={description}
+                                        className="progress-description"
+                                        disabled={!shouldShowLoading}
+                                      />
+                                    </div>
+                                  ) : null}
+                                  {item.result?.error && (
+                                    <ErrorMessage error={item.result.error} />
+                                  )}
                                 </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      ) : item.type === 'separator' ? (
+                        /* Separator Message */
+                        <div className="new-conversation-separator">
+                          <div className="separator-line" />
+                          <div className="separator-text-container">
+                            <Text type="secondary" className="separator-text">
+                              {item.content}
+                            </Text>
+                          </div>
+                        </div>
+                      ) : (
+                        /* System Message */
+                        <div className="system-message-container">
+                          {componentConfig.showSystemMessageHeader !==
+                            false && (
+                            <div className="system-message-header">
+                              <Icon
+                                component={branding.icon || PlaygroundIcon}
+                                style={{ fontSize: 20 }}
+                              />
+                              <span className="system-message-title">
+                                {branding.title || 'Playground'}
+                              </span>
+                            </div>
+                          )}
+                          {(item.content || item.result) && (
+                            <div className="system-message-content">
+                              {item.type === 'result' ? (
+                                <PlaygroundResultView
+                                  result={item.result || null}
+                                  loading={item.loading || false}
+                                  serverValid={true}
+                                  serviceMode={serviceMode}
+                                  replayScriptsInfo={
+                                    item.replayScriptsInfo || null
+                                  }
+                                  replayCounter={item.replayCounter || 0}
+                                  loadingProgressText={
+                                    item.loadingProgressText || ''
+                                  }
+                                  verticalMode={item.verticalMode || false}
+                                  fitMode="width"
+                                  actionType={item.actionType}
+                                  onDownloadReport={
+                                    componentConfig.onDownloadReport
+                                  }
+                                />
+                              ) : (
+                                <>
+                                  <div className="system-message-text">
+                                    {item.content}
+                                  </div>
+                                  {item.loading && item.loadingProgressText && (
+                                    <div className="loading-progress-text">
+                                      <span>{item.loadingProgressText}</span>
+                                    </div>
+                                  )}
+                                </>
                               )}
-                            </>
+                            </div>
                           )}
                         </div>
                       )}
-                    </div>
-                  )}
-                </List.Item>
-              )}
-            />
+                    </List.Item>
+                  );
+                }}
+              />
+            )}
           </div>
 
           {/* Scroll to Bottom Button */}

@@ -47,6 +47,11 @@ Usage:
         string: true,
         description: 'A list of yaml files to run, separated by space',
       },
+      setup: {
+        type: 'string',
+        description:
+          'A yaml file to run before the main files. Requires --share-browser-context',
+      },
       config: {
         type: 'string',
         description:
@@ -63,6 +68,10 @@ Usage:
       'continue-on-error': {
         type: 'boolean',
         description: `Continue execution even if some tasks fail, default is ${defaultConfig.continueOnError}`,
+      },
+      retry: {
+        type: 'number',
+        description: `Number of times to retry a failed yaml file. Only the cases that failed in the previous attempt are retried, default is ${defaultConfig.retry}`,
       },
       headed: {
         type: 'boolean',

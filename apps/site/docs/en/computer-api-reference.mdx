@@ -6,9 +6,11 @@ For common APIs that work across all platforms, see [Common API Reference](./api
 
 ## Agent Creation
 
-`agentFromComputer(opts?): Promise<ComputerAgent>`
+`agentForComputer(opts?): Promise<ComputerAgent>`
 
 Create an agent for local desktop automation.
+
+> Backward compatibility: `agentFromComputer` is still available as an alias.
 
 `agentForRDPComputer(opts): Promise<ComputerAgent<RDPDevice>>`
 
@@ -73,16 +75,16 @@ A complete demo of testing [Obsidian](https://obsidian.md/) (an Electron app) on
 **Example:**
 
 ```typescript
-import { agentFromComputer } from '@midscene/computer';
+import { agentForComputer } from '@midscene/computer';
 
 // Connect to primary display
-const agent = await agentFromComputer({
+const agent = await agentForComputer({
   aiActionContext: 'You are automating a desktop application.',
 });
 
 // Connect to specific display
 const displays = await ComputerDevice.listDisplays();
-const agent2 = await agentFromComputer({
+const agent2 = await agentForComputer({
   displayId: displays[1].id,
 });
 ```
@@ -99,6 +101,8 @@ const agent = await agentForRDPComputer({
   port: 3389,
   username: 'Admin',
   password: 'replace-with-your-password',
+  // Optional: bind the TCP connection to this local source IP.
+  localAddress: '10.75.166.10',
   ignoreCertificate: true,
 });
 
@@ -110,6 +114,10 @@ await agent.aiAct('Open Settings');
 :::tip Example: Remote Windows desktop over RDP
 A runnable demo that connects to a remote Windows machine over RDP, opens Settings, navigates into Windows Update, and emits a structured report: [https://github.com/web-infra-dev/midscene-example/tree/main/computer/rdp-demo](https://github.com/web-infra-dev/midscene-example/tree/main/computer/rdp-demo)
 :::
+
+Use `localAddress` only when the machine running Midscene has multiple outbound
+routes and the RDP server must be reached from a specific local source IP. Pass
+an IP address, not a network interface name.
 
 ## Device Management
 
@@ -179,6 +187,12 @@ The `ComputerAgent` class extends `PageAgent<ComputerDevice>` and inherits all c
 - `aiLocate(description: string)`: Locate an element
 - And more...
 
+Instant actions are also available for direct, deterministic control once an element is located:
+
+- `aiTap()`, `aiDoubleClick()`, `aiRightClick()`, `aiHover()`: Mouse actions
+- `aiInput()`, `aiClearInput()`, `aiKeyboardPress()`: Keyboard actions
+- `aiScroll()`: Scroll action
+
 See [Common API Reference](./api) for details.
 
 ## Available Actions
@@ -213,12 +227,16 @@ await agent.aiAct('right-click on the desktop');
 await agent.aiAct('right-click on the file');
 ```
 
-#### MouseMove
+#### MouseMove (Hover)
 
-Move mouse to an element.
+Move the mouse to an element — also known as hovering — for example to reveal a hover menu or tooltip.
 
 ```typescript
+// Natural-language form (move mouse / hover)
 await agent.aiAct('move mouse to the menu item');
+
+// Instant action: locate and hover in one call
+await agent.aiHover('the menu item "Products"');
 ```
 
 #### DragAndDrop
@@ -322,9 +340,9 @@ When you use RDP, `ListDisplays` returns the current remote session as a single 
 ### Open Application and Navigate
 
 ```typescript
-import { agentFromComputer } from '@midscene/computer';
+import { agentForComputer } from '@midscene/computer';
 
-const agent = await agentFromComputer();
+const agent = await agentForComputer();
 
 // Open application
 if (process.platform === 'darwin') {
@@ -351,21 +369,21 @@ if (process.platform === 'darwin') {
 ### Multi-Display Workflow
 
 ```typescript
-import { ComputerDevice, agentFromComputer } from '@midscene/computer';
+import { ComputerDevice, agentForComputer } from '@midscene/computer';
 
 // List displays
 const displays = await ComputerDevice.listDisplays();
 console.log(`Found ${displays.length} displays`);
 
 // Control primary display
-const agent1 = await agentFromComputer({
+const agent1 = await agentForComputer({
   displayId: displays[0].id,
 });
 await agent1.aiAct('move mouse to center of screen');
 
 // Control secondary display
 if (displays.length > 1) {
-  const agent2 = await agentFromComputer({
+  const agent2 = await agentForComputer({
     displayId: displays[1].id,
   });
   await agent2.aiAct('move mouse to center of screen');
@@ -375,9 +393,9 @@ if (displays.length > 1) {
 ### Web Browser Automation
 
 ```typescript
-import { agentFromComputer } from '@midscene/computer';
+import { agentForComputer } from '@midscene/computer';
 
-const agent = await agentFromComputer();
+const agent = await agentForComputer();
 
 // Open browser
 if (process.platform === 'darwin') {

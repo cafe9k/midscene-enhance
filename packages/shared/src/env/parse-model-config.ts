@@ -24,9 +24,25 @@ import {
 } from './types';
 
 import { getDebug } from '../logger';
+
 import { assert } from '../utils';
 import { maskConfig, parseJson } from './helper';
 import { initDebugConfig } from './init-debug';
+
+declare const __VERSION__: string | undefined;
+
+const MODEL_CONFIG_DOC_URL = 'https://midscenejs.com/model-common-config.html';
+
+const getCurrentVersion = (): string => {
+  if (typeof __VERSION__ !== 'undefined' && __VERSION__) {
+    return __VERSION__;
+  }
+
+  return 'unknown';
+};
+
+const getInvalidModelFamilyMessage = (modelFamily: TModelFamily): string =>
+  `Invalid MIDSCENE_MODEL_FAMILY value: ${modelFamily}. Current version v${getCurrentVersion()} accepts the following model families: ${MODEL_FAMILY_VALUES.join(', ')}. You can also visit ${MODEL_CONFIG_DOC_URL} for the latest configuration information.`;
 
 type TModelConfigKeys =
   | typeof INSIGHT_MODEL_CONFIG_KEYS
@@ -70,7 +86,7 @@ export const getUITarsModelVersion = (
  */
 export const validateModelFamily = (modelFamily?: TModelFamily): void => {
   if (modelFamily && !MODEL_FAMILY_VALUES.includes(modelFamily as any)) {
-    throw new Error(`Invalid MIDSCENE_MODEL_FAMILY value: ${modelFamily}`);
+    throw new Error(getInvalidModelFamilyMessage(modelFamily));
   }
 };
 
@@ -156,6 +172,15 @@ const normalizeOpenaiExtraConfig = (
   return rest;
 };
 
+const parseTemperature = (rawValue: string | undefined): number | undefined => {
+  if (rawValue === undefined || rawValue === '') {
+    return undefined;
+  }
+
+  const temperature = Number(rawValue);
+  return Number.isFinite(temperature) ? temperature : undefined;
+};
+
 /**
  * Parse OpenAI SDK config
  */
@@ -206,9 +231,7 @@ export const parseOpenaiSdkConfig = ({
   );
   const extraBodyStr: string | undefined = provider[keys.extraBody];
   const extraBody = parseJson(keys.extraBody, extraBodyStr);
-  const temperature = provider[keys.temperature]
-    ? Number(provider[keys.temperature])
-    : 0;
+  const temperature = parseTemperature(provider[keys.temperature]);
 
   const modelFamily = modelFamilyRaw as unknown as TModelFamily;
   validateModelFamily(modelFamily);
@@ -228,6 +251,7 @@ export const parseOpenaiSdkConfig = ({
     modelName: modelName!,
     modelDescription,
     intent: '-' as any,
+    slot: '-' as any,
     timeout: provider[keys.timeout]
       ? Number(provider[keys.timeout])
       : undefined,
@@ -255,6 +279,7 @@ export const parseOpenaiSdkConfig = ({
       const val = provider[keys.reasoningEnabled]?.trim()?.toLowerCase();
       if (val === 'true' || val === '1') return true;
       if (val === 'false' || val === '0') return false;
+      if (val === 'default') return 'default';
       return undefined;
     })(),
     reasoningBudget: (() => {
@@ -292,6 +317,7 @@ export const decideModelConfigFromIntentConfig = (
     useLegacyLogic: intent === 'default',
   });
   finalResult.intent = intent;
+  finalResult.slot = intent;
 
   debugLog(
     'decideModelConfig result by agent.modelConfig() with intent',

@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AbstractWebPage } from '@/web-page';
 import type { ReportActionDump } from '@midscene/core';
 import { Agent as PageAgent } from '@midscene/core/agent';
+import { getMidsceneRunSubDir } from '@midscene/shared/common';
 import { globalConfigManager } from '@midscene/shared/env';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -62,24 +63,6 @@ const mockedModelConfig = {
   MIDSCENE_MODEL_API_KEY: 'mock-api-key',
   MIDSCENE_MODEL_BASE_URL: 'mock-base-url',
   MIDSCENE_MODEL_FAMILY: 'qwen3-vl',
-};
-
-const modelConfigCalcByMockedModelConfig = {
-  httpProxy: undefined,
-  intent: 'default',
-  modelDescription: 'qwen3-vl mode',
-  modelName: 'mock-model',
-  openaiApiKey: 'mock-api-key',
-  openaiBaseURL: 'mock-base-url',
-  openaiExtraConfig: undefined,
-  socksProxy: undefined,
-  temperature: 0,
-  uiTarsModelVersion: undefined,
-  modelFamily: 'qwen3-vl',
-  createOpenAIClient: undefined,
-  retryCount: 1,
-  retryInterval: 2000,
-  timeout: undefined,
 };
 
 // Mock task executor
@@ -177,6 +160,16 @@ describe('PageAgent reportFileName', () => {
     });
 
     expect(agent.reportFileName).toBe(customReportName);
+  });
+
+  it('should reject empty reportFileName when provided', () => {
+    expect(
+      () =>
+        new PageAgent(mockPage, {
+          reportFileName: '',
+          modelConfig: mockedModelConfig,
+        }),
+    ).toThrow('reportFileName must be a non-empty string');
   });
 
   it('should generate reportFileName when not provided', () => {
@@ -290,7 +283,14 @@ describe('PageAgent aiWaitFor', () => {
         timeoutMs: 5000,
         checkIntervalMs: 1000,
       },
-      modelConfigCalcByMockedModelConfig,
+      expect.objectContaining({
+        config: expect.objectContaining({
+          modelName: 'mock-model',
+          modelFamily: 'qwen3-vl',
+          intent: 'insight',
+          slot: 'default',
+        }),
+      }),
     );
   });
 
@@ -328,7 +328,14 @@ describe('PageAgent aiWaitFor', () => {
         timeoutMs: 15000, // 15 * 1000
         checkIntervalMs: 3000, // 3 * 1000
       },
-      modelConfigCalcByMockedModelConfig,
+      expect.objectContaining({
+        config: expect.objectContaining({
+          modelName: 'mock-model',
+          modelFamily: 'qwen3-vl',
+          intent: 'insight',
+          slot: 'default',
+        }),
+      }),
     );
   });
 
@@ -358,7 +365,14 @@ describe('PageAgent aiWaitFor', () => {
         timeoutMs: 30000,
         checkIntervalMs: 5000,
       },
-      modelConfigCalcByMockedModelConfig,
+      expect.objectContaining({
+        config: expect.objectContaining({
+          modelName: 'mock-model',
+          modelFamily: 'qwen3-vl',
+          intent: 'insight',
+          slot: 'default',
+        }),
+      }),
     );
   });
 });
@@ -467,6 +481,66 @@ describe('PageAgent cache configuration', () => {
       expect(agent.taskCache?.readOnlyMode).toBe(false);
       expect(agent.taskCache?.writeOnlyMode).toBe(true);
       expect(agent.taskCache?.cacheId).toBe('custom-writeonly-cache');
+    });
+
+    it('should place cache file under provided dir without changing log/report dirs', async () => {
+      const cacheDir = path.join(
+        process.cwd(),
+        'tmp-custom-cache-dir',
+        `${Date.now()}`,
+      );
+      const logDir = getMidsceneRunSubDir('log');
+      const reportDir = getMidsceneRunSubDir('report');
+      try {
+        const agent = new PageAgent(mockPage, {
+          cache: {
+            id: 'custom-cache-dir-id',
+            cacheDir: ` ${cacheDir} `,
+          },
+          modelConfig: mockedModelConfig,
+        });
+
+        expect(agent.taskCache).toBeDefined();
+        const cacheFilePath = agent.taskCache?.cacheFilePath;
+        expect(cacheFilePath).toBe(
+          path.join(cacheDir, 'custom-cache-dir-id.cache.yaml'),
+        );
+        expect(getMidsceneRunSubDir('log')).toBe(logDir);
+        expect(getMidsceneRunSubDir('report')).toBe(reportDir);
+        expect(path.relative(cacheDir, logDir)).toMatch(/^\.\./);
+        expect(path.relative(cacheDir, reportDir)).toMatch(/^\.\./);
+
+        await agent.flushCache({ cleanUnused: false });
+        expect(fs.existsSync(cacheFilePath!)).toBe(true);
+      } finally {
+        if (fs.existsSync(cacheDir)) {
+          fs.rmSync(cacheDir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('should throw error for empty cache dir', () => {
+      expect(() => {
+        new PageAgent(mockPage, {
+          cache: {
+            id: 'custom-cache-id',
+            cacheDir: '  ',
+          },
+          modelConfig: mockedModelConfig,
+        });
+      }).toThrow('cache.cacheDir must be a non-empty string when provided');
+    });
+
+    it('should throw error for non-string cache dir', () => {
+      expect(() => {
+        new PageAgent(mockPage, {
+          cache: {
+            id: 'custom-cache-id',
+            cacheDir: 123 as any,
+          },
+          modelConfig: mockedModelConfig,
+        });
+      }).toThrow('cache.cacheDir must be a non-empty string when provided');
     });
 
     it('should throw error for cache: true even with testId', () => {
@@ -631,9 +705,9 @@ describe('PageAgent aiAct abortSignal', () => {
       abortSignal: controller.signal,
     });
 
-    // Verify the last argument passed to action is the abortSignal
+    // Verify the abortSignal argument is passed before report options.
     const callArgs = mockTaskExecutor.action.mock.calls[0];
-    expect(callArgs[callArgs.length - 1]).toBe(controller.signal);
+    expect(callArgs[callArgs.length - 2]).toBe(controller.signal);
   });
 
   it('should work normally without abortSignal', async () => {
@@ -648,9 +722,9 @@ describe('PageAgent aiAct abortSignal', () => {
 
     await agent.aiAct('click the button');
 
-    // Last argument should be undefined (no abortSignal)
+    // AbortSignal argument should be undefined when no signal is provided.
     const callArgs = mockTaskExecutor.action.mock.calls[0];
-    expect(callArgs[callArgs.length - 1]).toBeUndefined();
+    expect(callArgs[callArgs.length - 2]).toBeUndefined();
   });
 
   it('should throw with default reason when aborted without reason', async () => {

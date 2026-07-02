@@ -170,11 +170,12 @@ import { PlaywrightAiFixture } from '@midscene/web/playwright';
 export const test = base.extend<PlayWrightAiFixtureType>(
   PlaywrightAiFixture({
     waitForNetworkIdleTimeout: 2000, // optional, the timeout for waiting for network idle between each action, default is 2000ms
+    replanningCycleLimit: 30, // optional, override the default aiAct replanning cycle limit
   }),
 );
 ```
 
-`PlaywrightAiFixture()` accepts all `PlaywrightAgent` options, so you can configure shared agent behavior directly at fixture creation time. Fixture-managed metadata like `testId`, `reportFileName`, `groupName`, and `groupDescription` are still generated automatically.
+`PlaywrightAiFixture()` accepts all shared `PlaywrightAgent` options, so you can configure agent behavior like `replanningCycleLimit`, `waitAfterAction`, and `modelConfig` directly at fixture creation time. Fixture-managed metadata like `testId`, `reportFileName`, `groupName`, and `groupDescription` is still generated automatically.
 
 ### Step 3: Write test cases
 
@@ -274,6 +275,12 @@ const mid = new PlaywrightAgent(page, {
 });
 ```
 
+### Browser support
+
+Some Midscene web automation features rely on Chrome DevTools Protocol (CDP), which is provided by Chromium-based browsers. These include browser-level events, touch gestures, and CDP fallback paths used by specific interactions.
+
+When using Playwright, Chromium is the recommended browser engine. Firefox and WebKit may work for basic Playwright-native operations, but Midscene features that depend on CDP may report errors on those engines.
+
 ### Connect Midscene Agent to a Remote Playwright Browser
 
 :::info Example Project
@@ -356,6 +363,32 @@ await agent.aiAct('click the red button five times');
 Check [Integrate with any interface](./integrate-with-any-interface#define-a-custom-action) for more details about defining custom actions.
 
 ## FAQ
+
+### Playwright browser download takes too long
+
+Playwright does not download browser binaries during `npm install` by default. You need to run `npx playwright install` separately, and that step can be slow on limited networks.
+
+You can speed it up in two ways:
+
+1. Use a mirror, for example `npmmirror.com`
+
+```bash
+PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright" npx playwright install
+```
+
+2. Download only the commonly used `chromium`
+
+```bash
+npx playwright install --with-deps chromium
+```
+
+### Cannot click the dropdown
+
+This usually happens when the page uses a native `select` element for the dropdown. In that case, the browser asks the operating system to render the expanded option list with a native control, so the dropdown is not actually rendered inside the webpage and cannot be captured by Playwright screenshots.
+
+First, check the screenshot in the report. If the dropdown options do not appear in the report screenshot after the click, this is very likely the cause.
+
+Midscene enables `forceChromeSelectRendering` by default, which forces Chrome to render the `select` dropdown so it appears in screenshots and can be recognized by Playwright. The dropdown style will look noticeably different from the operating system's default style. If you need the native rendering back, set `forceChromeSelectRendering: false`.
 
 ### The webpage continues to flash when running in headed mode
 

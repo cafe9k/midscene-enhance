@@ -93,6 +93,14 @@
         border: none;
         background: none;
       }
+
+      .playground-empty-state-wrapper {
+        min-height: 100%;
+      }
+
+      .playground-empty-state-wrapper-offset-for-prompt {
+        padding-bottom: 128px;
+      }
     }
 
     .scroll-to-bottom-button {
@@ -139,6 +147,35 @@
   }
 
   // Progress Message Styles
+  .progress-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 4px 0;
+  }
+
+  .progress-row-content {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .progress-status-icon {
+    flex: 0 0 auto;
+
+    &.loading {
+      color: #1890ff;
+    }
+
+    &.completed {
+      color: #52c41a;
+    }
+
+    &.error {
+      color: #ff4d4f;
+      font-weight: bold;
+    }
+  }
+
   .progress-action-item {
     background: var(--midscene-surface-muted, #f2f4f7);
     color: var(--midscene-text-primary, #000);
@@ -149,24 +186,7 @@
     padding: 0 12px;
     display: flex;
     justify-content: space-between;
-    margin: 4px 0;
-
-    .progress-status-icon {
-      margin-left: 4px;
-
-      &.loading {
-        color: #1890ff;
-      }
-
-      &.completed {
-        color: #52c41a;
-      }
-
-      &.error {
-        color: #ff4d4f;
-        font-weight: bold;
-      }
-    }
+    margin: 0;
   }
 
   .progress-description {
@@ -390,13 +410,18 @@
  * --- Conversation skin ---
  *
  * Shared skin used by `PlaygroundConversationPanel` across Studio and the
- * standalone playground apps. Renders consecutive progress steps as a
- * stair-stepped column, tightens message spacing, and adopts the compact
+ * standalone playground apps. Renders the Execution Flow as compact rows:
+ * 16x16 status icon on the left and the action + description text flowing
+ * inline on the right. Tightens message spacing and adopts the compact
  * bubble/input treatment previously unique to the Studio shell.
+ *
+ * Layout reference (matches the imported design):
+ *   group header and status icon start at the 20px container inset
+ *   step text starts 36px after the status icon column
  */
 .playground-container.playground-conversation-skin {
   .middle-dialog-area .info-list-container {
-    padding: 20px 16px 32px;
+    padding: 20px 16px 32px 20px;
   }
 
   .middle-dialog-area .info-list-container .ant-list-items {
@@ -423,71 +448,133 @@
 
   .bottom-input-section {
     flex-shrink: 0;
-    border-top: 1px solid var(--midscene-border-subtle);
     background: var(--midscene-surface);
     padding: 12px;
   }
 
-  .list-item:has(.progress-action-item) {
-    position: relative;
-    padding-left: 0;
-  }
+  // === Execution Flow step rows ===
+  // Each progress list-item is its own row. The header stays at the
+  // container's 20px inset, while only the progress content reserves the
+  // left indicator column.
+  // Selectors are scoped under `.middle-dialog-area .info-list-container`
+  // to outweigh the base (5-class) `.ant-list-item { padding: 0 }` rule.
+  .middle-dialog-area .info-list-container {
+    .list-item:has(.progress-row) {
+      position: relative;
+      min-height: 24px;
+    }
 
-  // Wrap pill + description in a flex column so the gap between them is
-  // governed by a single `gap: 8px` rule rather than the pill's own
-  // margin-bottom (inline-flex line-box quirks inflate the distance
-  // otherwise).
-  .list-item > div:has(> .progress-action-item) {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-  }
+    // The unclassed wrapper div around each progress row owns the
+    // two-column layout: 16px icon, 20px gap, then text.
+    .list-item > div:has(> .progress-row) {
+      display: grid;
+      grid-template-columns: 16px minmax(0, 1fr);
+      column-gap: 20px;
+      align-items: start;
+      min-height: 24px;
+      padding: 4px 0;
+    }
 
-  .progress-action-item {
-    display: flex;
-    width: fit-content;
-    max-width: 100%;
-    height: 28px;
-    align-items: center;
-    flex-direction: row-reverse;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 2px 12px 2px 4px;
-    margin: 0 0 0 24px;
-    border-radius: 38px;
-    background: rgba(0, 0, 0, 0.08);
-    color: rgba(0, 0, 0, 0.7);
-    font-size: 14px;
-    line-height: 22px;
-  }
+    .progress-row {
+      display: contents;
+      margin: 0;
+    }
 
-  .progress-action-item .progress-status-icon {
-    display: inline-flex;
-    width: 24px;
-    height: 24px;
-    align-items: center;
-    justify-content: center;
-    margin-left: 0;
-    font-size: 14px;
-  }
+    .progress-row-content {
+      min-width: 0;
+      line-height: 20px;
+    }
 
-  // Description wrapper: the visualiser renders descriptions inside an
-  // unclassed `<div>` right after the pill span. Selecting via
-  // `.progress-action-item + div` applies the 20px left padding used by
-  // this shell skin. The vertical gap with the pill is controlled by the
-  // parent flex column's `gap: 8px`, so this block only handles
-  // horizontal offset.
-  .progress-action-item + div {
-    padding-left: 20px;
-    margin: 0;
-    width: 100%;
-  }
+    // Drop the pill chrome — render the action label as plain inline text.
+    .progress-action-item {
+      display: inline;
+      padding: 0;
+      margin: 0;
+      height: auto;
+      line-height: 20px;
+      border-radius: 0;
+      background: transparent;
+      color: var(--midscene-text-primary, rgba(0, 0, 0, 0.85));
+      font-family: Roboto, Inter, system-ui, sans-serif;
+      font-weight: 400;
+      font-size: 12px;
+      letter-spacing: 0;
+    }
 
-  .progress-description {
-    padding: 0;
-    margin: 0;
-    color: rgba(0, 0, 0, 0.85);
+    .progress-status-icon {
+      width: 16px;
+      height: 16px;
+      margin: 3px 0 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+
+      &.loading {
+        font-size: 14px;
+      }
+    }
+
+    .progress-status-icon svg {
+      display: block;
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+    }
+
+    // Description wrapper: the visualiser renders descriptions inside an
+    // unclassed `<div>` right after the action span. Switch it to inline
+    // so the description text joins the action text on the same line and
+    // wraps naturally; insert a " - " separator to match the design copy.
+    .progress-action-item + .progress-description-wrap {
+      display: inline;
+      margin: 0;
+      padding: 0;
+    }
+
+    .progress-action-item + .progress-description-wrap::before {
+      content: ' - ';
+    }
+
+    .progress-action-item + .progress-description-wrap .shiny-text {
+      display: inline;
+      padding: 0;
+      margin: 0;
+    }
+
+    .progress-description {
+      display: inline;
+      padding: 0;
+      margin: 0;
+      font-family: Roboto, Inter, system-ui, sans-serif;
+      font-size: 12px;
+      line-height: 20px;
+      color: var(--midscene-text-primary, rgba(0, 0, 0, 0.85));
+    }
+
+    // Ant-list's 16px row gap would visibly outpace the 8px intra-step
+    // gap; pull each subsequent progress item up by 8px to equalise.
+    .list-item:has(.progress-row) + .list-item:has(.progress-row) {
+      margin-top: -8px;
+    }
+
+    // Toggle header sits above the steps. It starts at the container's
+    // 20px left inset, matching the design.
+    .progress-group-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 15px;
+      margin: 0 0 8px;
+      padding: 0 4px 0 0;
+      font-family: Inter, system-ui, sans-serif;
+      font-weight: 500;
+      font-size: 12px;
+      line-height: 14.5px;
+      color: var(--midscene-text-tertiary, rgba(0, 0, 0, 0.5));
+    }
   }
 
   .system-message-content,
@@ -496,61 +583,22 @@
     line-height: 22px;
     color: rgba(0, 0, 0, 0.85);
   }
-
-  // Ant-list's 16px row gap would visibly outpace the 8px intra-step
-  // gap; pull each subsequent progress item up by 8px to equalise.
-  .list-item:has(.progress-action-item)
-    + .list-item:has(.progress-action-item) {
-    margin-top: -8px;
-  }
-
-  // Vertical connector between consecutive progress items. Drawn from a
-  // 23px top inset so the first step's line sits below the collapsible
-  // "Execution Flow" header; the adjacent-sibling rule resets to top 0
-  // on subsequent items so segments meet without a break.
-  .list-item:has(.progress-action-item):has(
-      + .list-item .progress-action-item
-    )::after {
-    content: '';
-    position: absolute;
-    left: 12px;
-    top: 23px;
-    bottom: -16px;
-    width: 1px;
-    background: rgba(0, 0, 0, 0.08);
-    pointer-events: none;
-  }
-
-  .list-item:has(.progress-action-item)
-    + .list-item:has(.progress-action-item):has(
-      + .list-item .progress-action-item
-    )::after {
-    top: 0;
-  }
-
-  .progress-group-toggle {
-    padding-left: 4px;
-    margin: 0 0 8px;
-  }
 }
 
-// Dark mode palette for the conversation skin — rgba(0,0,0,0.08) on a dark
-// surface is invisible, flip every channel.
+// Dark mode palette for the conversation skin.
 [data-theme='dark'] .playground-container.playground-conversation-skin {
-  .progress-action-item {
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.7);
-  }
+  .middle-dialog-area .info-list-container {
+    .progress-action-item {
+      color: var(--midscene-text-primary);
+    }
 
-  .list-item:has(.progress-action-item):has(
-      + .list-item .progress-action-item
-    )::after {
-    background: rgba(255, 255, 255, 0.12);
+    .progress-description {
+      color: var(--midscene-text-primary);
+    }
   }
 
   .system-message-content,
-  .system-message-content .system-message-text,
-  .progress-description {
+  .system-message-content .system-message-text {
     color: var(--midscene-text-primary);
   }
 }

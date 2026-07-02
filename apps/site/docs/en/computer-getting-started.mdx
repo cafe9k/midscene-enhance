@@ -15,6 +15,8 @@ Integrate Vitest for testing: [https://github.com/web-infra-dev/midscene-example
 
 Control a remote Windows desktop over RDP: [https://github.com/web-infra-dev/midscene-example/tree/main/computer/rdp-demo](https://github.com/web-infra-dev/midscene-example/tree/main/computer/rdp-demo)
 
+Test [Obsidian](https://obsidian.md/) (an Electron app) on headless Linux CI with `@midscene/computer`: [https://github.com/web-infra-dev/midscene-example/tree/main/computer/electron-demo](https://github.com/web-infra-dev/midscene-example/tree/main/computer/electron-demo)
+
 :::
 
 <SetupEnv />
@@ -29,6 +31,8 @@ Node.js 18.19.0 or higher is required.
 
 **macOS**: Accessibility permissions are required for keyboard and mouse control. When you run the script for the first time, macOS will prompt you to grant access. Go to **System Settings > Privacy & Security > Accessibility** and enable permissions for the application running your script (e.g., Terminal, iTerm2, VS Code, WebStorm, or other IDEs). For more details, see [nut.js macOS setup](https://github.com/nut-tree/nut.js#macos).
 
+**Windows**: No extra setup is needed for ordinary apps. However, Windows isolates input across privilege levels (UIPI): a non-elevated process **cannot** send mouse or keyboard input to a window that runs **as Administrator** (elevated). The input is silently dropped — the cursor still moves to the right spot, but clicks and keystrokes have no effect. Prefer running the target application without Administrator privileges. If the target application must stay elevated, run the terminal or Node.js that launches Midscene **as Administrator** too, so both processes share the same privilege level. See [Windows: clicks have no effect on some apps](#windows-clicks-have-no-effect-on-some-apps).
+
 **Linux**: [ImageMagick](https://imagemagick.org/script/download.php) is required for screenshot functionality.
 
 **Headless Linux (CI)**: To run desktop automation on a headless Linux server (e.g. GitHub Actions), install Xvfb and its dependencies, then enable headless mode:
@@ -40,17 +44,13 @@ sudo apt-get install -y xvfb x11-xserver-utils imagemagick
 
 ```typescript
 // Option 1: Pass headless option
-const agent = await agentFromComputer({ headless: true });
+const agent = await agentForComputer({ headless: true });
 
 // Option 2: Set environment variable
 // MIDSCENE_COMPUTER_HEADLESS_LINUX=true npx tsx example.ts
 ```
 
 Xvfb creates a virtual display so that mouse, keyboard, and screenshot operations work without a physical monitor. See [API Reference](./computer-api-reference) for details.
-
-:::tip Example: Testing Electron Apps on Headless Linux CI
-A complete demo of testing [Obsidian](https://obsidian.md/) (an Electron app) on headless Linux CI with `@midscene/computer`: [https://github.com/web-infra-dev/midscene-example/tree/main/computer/electron-demo](https://github.com/web-infra-dev/midscene-example/tree/main/computer/electron-demo)
-:::
 
 ## Try Playground (no code)
 
@@ -83,11 +83,11 @@ Once Playground works, move to a repeatable script with the JavaScript SDK.
 Create `example.ts`:
 
 ```typescript
-import { agentFromComputer } from '@midscene/computer';
+import { agentForComputer } from '@midscene/computer';
 
 (async () => {
   // Create an agent
-  const agent = await agentFromComputer({
+  const agent = await agentForComputer({
     aiActionContext: 'You are controlling a desktop computer.',
   });
 
@@ -160,14 +160,14 @@ RDP sessions are exposed to Midscene as a single remote display. You can still u
 If you have multiple displays, you can control a specific one:
 
 ```typescript
-import { ComputerDevice, agentFromComputer } from '@midscene/computer';
+import { ComputerDevice, agentForComputer } from '@midscene/computer';
 
 // List all displays
 const displays = await ComputerDevice.listDisplays();
 console.log('Available displays:', displays);
 
 // Connect to a specific display
-const agent = await agentFromComputer({
+const agent = await agentForComputer({
   displayId: displays[0].id,
 });
 ```
@@ -263,6 +263,14 @@ macOS requires Accessibility permissions for keyboard and mouse control. Go to *
 
 If you have already granted permission but it still doesn't work, try removing the app from the Accessibility list and re-adding it — macOS sometimes caches stale permissions.
 
+### Windows: clicks have no effect on some apps
+
+If the cursor moves to the correct position but clicks or key presses do nothing on a particular application — while other apps work fine — check whether the target app is running **as Administrator** (elevated). Windows UIPI blocks input injected from a lower-privilege process into an elevated window and drops it silently, with no error.
+
+Prefer lowering the target application's privilege level first, for example by launching it without "Run as Administrator" or disabling any setting that always starts it elevated. If the target app must stay elevated, run the terminal or Node.js that launches Midscene **as Administrator** so it matches the target app's privilege level, then try again. System-level shortcuts such as `Win+Tab` are handled by the shell and keep working even when this happens, which is why keyboard shortcuts may appear to work while in-app clicks do not.
+
+> The health check logged at connection time prints this troubleshooting link when Midscene is not running as Administrator on Windows.
+
 ### Linux: Screenshots or interactions fail on a headless server
 
 A headless Linux environment (e.g. CI) has no physical display. You need to install Xvfb and ImageMagick, and enable headless mode:
@@ -272,7 +280,7 @@ sudo apt-get install -y xvfb x11-xserver-utils imagemagick
 ```
 
 ```typescript
-const agent = await agentFromComputer({ headless: true });
+const agent = await agentForComputer({ headless: true });
 ```
 
 Or set the environment variable:

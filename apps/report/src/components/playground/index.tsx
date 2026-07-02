@@ -1,4 +1,10 @@
-import type { DeviceAction, ExecutionDump, UIContext } from '@midscene/core';
+import type {
+  DeviceAction,
+  ExecutionDump,
+  IReportActionDump,
+  ReportActionDump,
+  UIContext,
+} from '@midscene/core';
 import { GroupedActionDump } from '@midscene/core';
 import { paramStr, typeStr } from '@midscene/core/agent';
 import { type PlaygroundSDK, noReplayAPIs } from '@midscene/playground';
@@ -17,7 +23,7 @@ import {
   useServerValid,
 } from '@midscene/visualizer';
 import type { StaticPageAgent } from '@midscene/web/static';
-import { Form, message } from 'antd';
+import { App as AntdApp, Form } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import {
@@ -64,6 +70,7 @@ export function StandardPlayground({
   dryMode = false,
   canDownloadReport,
 }: PlaygroundProps) {
+  const { message } = AntdApp.useApp();
   const { serviceMode } = useEnvConfig();
   // State management
   const [uiContextPreview, setUiContextPreview] = useState<
@@ -296,9 +303,10 @@ export function StandardPlayground({
           },
         );
       }
+      const resolvedDeepThink = deepThink === 'unset' ? undefined : deepThink;
       const baseExecutionOptions = {
         deepLocate,
-        ...(actionType === 'aiAct' ? { deepThink } : {}),
+        ...(actionType === 'aiAct' ? { deepThink: resolvedDeepThink } : {}),
         screenshotIncluded,
         domIncluded,
         requestId: thisRunningId,
@@ -378,11 +386,13 @@ export function StandardPlayground({
         // For In-Browser mode, get dump and reportHTML from agent after execution (even if there was an error)
         // Only override if not already set by PlaygroundSDK response
         if (!result.dump) {
-          result.dump = activeAgent?.dumpDataString()
-            ? GroupedActionDump.fromSerializedString(
-                activeAgent.dumpDataString(),
-              )
-            : null;
+          result.dump = (
+            activeAgent?.dumpDataString()
+              ? GroupedActionDump.fromSerializedString(
+                  activeAgent.dumpDataString(),
+                )
+              : null
+          ) as PlaygroundResult['dump'];
         }
         if (!result.reportHTML) {
           result.reportHTML = activeAgent?.reportHTMLString() || null;
@@ -415,7 +425,9 @@ export function StandardPlayground({
     // Only generate replay info for interaction APIs, not for data extraction or validation APIs
 
     if (result?.dump && !noReplayAPIs.includes(actionType)) {
-      const info = allScriptsFromDump(result.dump);
+      const info = allScriptsFromDump(
+        result.dump as ReportActionDump | IReportActionDump | ExecutionDump,
+      );
       setReplayScriptsInfo(info);
       setReplayCounter((c) => c + 1);
     } else {

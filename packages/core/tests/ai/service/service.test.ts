@@ -1,15 +1,17 @@
+import { getModelRuntime } from '@/ai-model/models';
 import { distance } from '@/ai-model/prompt/util';
 import Service from '@/service';
 import { sleep } from '@/utils';
 import { globalModelConfigManager } from '@midscene/shared/env';
-import { getContextFromFixture } from 'tests/evaluation';
 import { beforeAll, describe, expect, test, vi } from 'vitest';
+import { getContextFromFixture } from '../../evaluation';
 
 vi.setConfig({
   testTimeout: 120 * 1000,
 });
 
 const modelConfig = globalModelConfigManager.getModelConfig('insight');
+const modelRuntime = getModelRuntime(modelConfig);
 
 describe.skipIf(!modelConfig.modelFamily)(
   'service locate with deep think',
@@ -24,7 +26,7 @@ describe.skipIf(!modelConfig.modelFamily)(
           deepLocate: true,
         },
         {},
-        modelConfig,
+        modelRuntime,
       );
       expect(element).toBeDefined();
 
@@ -41,7 +43,7 @@ describe.skipIf(!modelConfig.modelFamily)(
           deepLocate: true,
         },
         {},
-        modelConfig,
+        modelRuntime,
       );
       expect(element).toBeDefined();
       expect(rect).toBeDefined();
@@ -72,7 +74,7 @@ test.skip('service locate with search area', async () => {
       deepLocate: true,
     },
     {},
-    modelConfig,
+    modelRuntime,
   );
   console.log(element, rect);
   await sleep(3000);
@@ -94,7 +96,7 @@ describe(
           width: 80,
           height: 30,
         },
-        modelConfig,
+        modelRuntime,
       );
 
       expect(description).toBeDefined();
@@ -103,7 +105,7 @@ describe(
     test('service describe - by center point', async () => {
       const { context } = await getContextFromFixture('taobao');
       const service = new Service(context);
-      const { description } = await service.describe([580, 140], modelConfig);
+      const { description } = await service.describe([580, 140], modelRuntime);
 
       expect(description).toBeDefined();
     });

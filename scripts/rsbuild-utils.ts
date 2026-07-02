@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { pluginTypeCheck } from '@rsbuild/plugin-type-check';
 
 export interface CopyStaticOptions {
   srcDir: string;
@@ -12,6 +13,17 @@ export const commonIgnoreWarnings = [
   /Critical dependency: the request of a dependency is an expression/,
 ];
 
+export const createTypeCheckPlugin = () =>
+  pluginTypeCheck({
+    tsCheckerOptions: {
+      typescript: {
+        // Keep type checking scoped to the current project instead of letting
+        // TypeScript build mode follow the project references graph.
+        build: false,
+      },
+    },
+  });
+
 export const createCopyStaticPlugin = (options: CopyStaticOptions) => ({
   name: options.pluginName || 'copy-static',
   setup(api: any) {
@@ -21,6 +33,8 @@ export const createCopyStaticPlugin = (options: CopyStaticOptions) => ({
       const stat = await fs.promises.lstat(destDir).catch(() => null);
       if (stat?.isSymbolicLink()) {
         await fs.promises.unlink(destDir);
+      } else if (stat) {
+        await fs.promises.rm(destDir, { recursive: true, force: true });
       }
 
       await fs.promises.mkdir(destDir, { recursive: true });

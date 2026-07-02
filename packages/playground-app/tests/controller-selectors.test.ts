@@ -24,8 +24,6 @@ describe('buildConversationConfig', () => {
       deviceType: 'android',
       promptInputChrome: {
         variant: 'minimal',
-        placeholder: 'Type a message',
-        primaryActionLabel: 'Action',
       },
       executionFlow: {
         collapsible: true,
@@ -35,6 +33,21 @@ describe('buildConversationConfig', () => {
         countdownSeconds: 5,
       },
     });
+
+    expect(
+      buildConversationConfig({
+        deviceType: 'android',
+        executionUxHints: [],
+        countdownSeconds: 3,
+      }).promptInputChrome,
+    ).not.toHaveProperty('placeholder');
+    expect(
+      buildConversationConfig({
+        deviceType: 'android',
+        executionUxHints: [],
+        countdownSeconds: 3,
+      }).promptInputChrome,
+    ).not.toHaveProperty('primaryActionLabel');
   });
 
   it('preserves shared execution flow defaults when hosts add partial overrides', () => {

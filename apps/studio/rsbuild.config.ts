@@ -3,16 +3,26 @@ import { defineConfig } from '@rsbuild/core';
 import { pluginLess } from '@rsbuild/plugin-less';
 import { pluginNodePolyfill } from '@rsbuild/plugin-node-polyfill';
 import { pluginReact } from '@rsbuild/plugin-react';
-import { pluginTypeCheck } from '@rsbuild/plugin-type-check';
-import { pluginWorkspaceDev } from 'rsbuild-plugin-workspace-dev';
-import { commonIgnoreWarnings } from '../../scripts/rsbuild-utils.ts';
+import { pluginSvgr } from '@rsbuild/plugin-svgr';
+import {
+  commonIgnoreWarnings,
+  createTypeCheckPlugin,
+} from '../../scripts/rsbuild-utils.ts';
 import { version as appVersion } from './package.json';
 import {
   rendererDevHost,
   rendererDevPort,
 } from './scripts/renderer-dev-config.mjs';
 
+// Studio is loaded by Electron through both the dev server and built
+// `file://` HTML. A relative prefix works in both places; an absolute
+// `/static/...` prefix leaves packaged/build smoke runs with a blank renderer.
+const rendererAssetPrefix = './';
+
 export default defineConfig({
+  source: {
+    tsconfigPath: 'tsconfig.build.json',
+  },
   tools: {
     rspack: {
       ignoreWarnings: commonIgnoreWarnings,
@@ -27,10 +37,19 @@ export default defineConfig({
   },
   plugins: [
     pluginReact(),
+    pluginSvgr({
+      // Only source-imported workspace components (for example
+      // @midscene/playground-app) rely on default SVG-as-React-component
+      // imports. Studio's own assets use new URL(...).href and should stay
+      // as asset URLs.
+      excludeImporter: /apps[\\/]studio[\\/]src[\\/]/,
+      svgrOptions: {
+        exportType: 'default',
+      },
+    }),
     pluginLess(),
     pluginNodePolyfill(),
-    pluginTypeCheck(),
-    pluginWorkspaceDev(),
+    createTypeCheckPlugin(),
   ],
   resolve: {
     alias: {
@@ -42,6 +61,41 @@ export default defineConfig({
         __dirname,
         '../../packages/shared/src/polyfills/async-hooks.ts',
       ),
+      // Renderer lazy chunks import playground-app on demand. Point dev/build
+      // resolution at the workspace source so Rsbuild does not depend on the
+      // package dist entry during rslib watch rebuild windows.
+      '@midscene/playground-app$': path.join(
+        __dirname,
+        '../../packages/playground-app/src/index.ts',
+      ),
+      // Source-imported renderer packages depend on @midscene/playground.
+      // Resolve that package to its browser-safe source entry so lazy chunks
+      // do not depend on dist/es/index.browser.mjs existing during rslib
+      // watch rebuild windows. Keep this exact-match only: the Node-side
+      // server entry remains externalized in the main process build.
+      '@midscene/playground$': path.join(
+        __dirname,
+        '../../packages/playground/src/index.browser.ts',
+      ),
+      // Same reason as playground-app: renderer imports visualizer directly and
+      // via playground-app. Use source entries so rslib watch cannot break lazy
+      // compilation while dist files are being removed and rebuilt.
+      '@midscene/visualizer$': path.join(
+        __dirname,
+        '../../packages/visualizer/src/index.tsx',
+      ),
+      '@midscene/visualizer/history-selector$': path.join(
+        __dirname,
+        '../../packages/visualizer/src/component/history-selector/index.tsx',
+      ),
+      '@midscene/web/static$': path.join(
+        __dirname,
+        '../../packages/web-integration/src/static/index.ts',
+      ),
+      '@/utils$': path.join(
+        __dirname,
+        '../../packages/visualizer/src/utils/index.ts',
+      ),
       undici: false,
       'fetch-socks': false,
     },
@@ -49,7 +103,7 @@ export default defineConfig({
   environments: {
     renderer: {
       html: {
-        title: 'Midscene Studio',
+        title: 'Midscene Studio Beta',
       },
       source: {
         entry: {
@@ -60,6 +114,7 @@ export default defineConfig({
         },
       },
       output: {
+        assetPrefix: rendererAssetPrefix,
         target: 'web',
         distPath: {
           root: 'dist/renderer',
@@ -90,6 +145,7 @@ export default defineConfig({
         },
         externals: [
           'electron',
+          'electron-updater',
           '@midscene/android',
           '@midscene/android-playground',
           '@midscene/computer',
@@ -97,6 +153,7 @@ export default defineConfig({
           '@midscene/harmony',
           '@midscene/ios',
           '@midscene/playground',
+          '@midscene/playground/recorder-ui-describer',
         ],
         sourceMap: true,
       },

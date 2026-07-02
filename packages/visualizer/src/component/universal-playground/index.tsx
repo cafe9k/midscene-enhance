@@ -606,6 +606,9 @@ export function UniversalPlayground({
                                   onDownloadReport={
                                     componentConfig.onDownloadReport
                                   }
+                                  onDownloadReportZip={
+                                    componentConfig.onDownloadReportZip
+                                  }
                                 />
                               ) : (
                                 <>

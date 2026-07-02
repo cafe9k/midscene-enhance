@@ -3,10 +3,11 @@ import {
   Logo,
   NavActions,
   type PlaygroundBranding,
+  type ReportDownloadRequest,
   type UniversalPlaygroundConfig,
 } from '@midscene/visualizer';
 import { Layout } from 'antd';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { DisconnectedPreview } from './DisconnectedPreview';
 import { PlaygroundPreview } from './PlaygroundPreview';
@@ -49,6 +50,45 @@ export function PlaygroundApp({
     countdownSeconds: playgroundConfig?.executionUx?.countdownSeconds,
     pollIntervalMs,
   });
+  const downloadReportZip = useCallback(
+    async ({ content, defaultFileName }: ReportDownloadRequest) => {
+      const response = await fetch(`${serverUrl}/report/split-zip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ reportHTML: content }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to download report zip: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = defaultFileName;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+
+      try {
+        anchor.click();
+      } finally {
+        document.body.removeChild(anchor);
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+    },
+    [serverUrl],
+  );
+  const mergedPlaygroundConfig = useMemo(
+    () => ({
+      ...playgroundConfig,
+      onDownloadReportZip:
+        playgroundConfig?.onDownloadReportZip ?? downloadReportZip,
+    }),
+    [downloadReportZip, playgroundConfig],
+  );
 
   useEffect(() => {
     const handleResize = () => {
@@ -111,7 +151,7 @@ export function PlaygroundApp({
                     controller={controller}
                     appVersion={appVersion}
                     branding={branding}
-                    playgroundConfig={playgroundConfig}
+                    playgroundConfig={mergedPlaygroundConfig}
                     title={title}
                   />
                 </div>

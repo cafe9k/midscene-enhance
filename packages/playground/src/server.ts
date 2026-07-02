@@ -1,7 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import type { Server } from 'node:http';
-import { dirname, join, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   AgentDescribeElementAtPointResult,
@@ -15,6 +24,7 @@ import {
   ReportActionDump,
   describeElementAtPoint,
   runConnectivityTest,
+  splitReportFile,
 } from '@midscene/core';
 import type { Agent as PageAgent } from '@midscene/core/agent';
 import { getModelRuntime } from '@midscene/core/ai-model';
@@ -43,6 +53,7 @@ import {
 } from '@midscene/shared/recorder';
 import { uuid } from '@midscene/shared/utils';
 import express, { type Request, type Response } from 'express';
+import { zipSync } from 'fflate';
 import { executeAction, formatErrorMessage } from './common';
 import { MjpegStreamHandler } from './mjpeg-stream-handler';
 import type {
@@ -952,6 +963,41 @@ const BROWSER_CHROME_NAVIGATION_ACTIONS = new Set([
 function isRecoverablePageSessionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return RECOVERABLE_PAGE_SESSION_ERROR_PATTERN.test(message);
+}
+
+function buildSplitReportZipEntries(
+  outputDir: string,
+): Record<string, Uint8Array> {
+  const entries: Record<string, Uint8Array> = {};
+  const addDirectory = (dir: string) => {
+    for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        addDirectory(fullPath);
+        continue;
+      }
+      entries[relative(outputDir, fullPath)] = new Uint8Array(
+        readFileSync(fullPath),
+      );
+    }
+  };
+  addDirectory(outputDir);
+  return entries;
+}
+
+function createSplitReportZip(reportHTML: string): Buffer {
+  const workDir = mkdtempSync(join(tmpdir(), 'midscene-split-report-'));
+  const htmlPath = join(workDir, 'report.html');
+  const outputDir = join(workDir, 'split');
+
+  try {
+    writeFileSync(htmlPath, reportHTML, 'utf-8');
+    splitReportFile({ htmlPath, outputDir });
+    const entries = buildSplitReportZipEntries(outputDir);
+    return Buffer.from(zipSync(entries));
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
 }
 
 class PlaygroundServer {
@@ -2866,6 +2912,33 @@ class PlaygroundServer {
         if (this.currentTaskId === requestId) {
           this.currentTaskId = null;
         }
+      }
+    });
+
+    this._app.post('/report/split-zip', async (req: Request, res: Response) => {
+      const { reportHTML } = req.body || {};
+
+      if (typeof reportHTML !== 'string' || !reportHTML) {
+        return res.status(400).json({
+          error: 'reportHTML is required and must be a string',
+        });
+      }
+
+      try {
+        const zipBuffer = createSplitReportZip(reportHTML);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader(
+          'Content-Disposition',
+          'attachment; filename="midscene_report_split.zip"',
+        );
+        res.send(zipBuffer);
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        console.error('Failed to generate split report zip:', errorMessage);
+        res.status(500).json({
+          error: `Failed to generate split report zip: ${errorMessage}`,
+        });
       }
     });
 

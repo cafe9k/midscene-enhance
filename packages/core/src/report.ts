@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   copyFileSync,
@@ -484,6 +485,76 @@ function extensionByMimeType(mimeType: string): 'png' | 'jpeg' {
   throw new Error(`Unsupported screenshot mime type: ${mimeType}`);
 }
 
+function parseInlineScreenshotDataUri(value: unknown): {
+  dataUri: string;
+  rawBase64: string;
+  mimeType: 'image/png' | 'image/jpeg';
+  extension: 'png' | 'jpeg';
+  capturedAt: number;
+} | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.base64 !== 'string') return null;
+  if (typeof record.capturedAt !== 'number') return null;
+
+  const match = record.base64.match(
+    /^data:image\/(png|jpeg|jpg);base64,([\s\S]+)$/,
+  );
+  if (!match) return null;
+
+  const format = match[1] === 'jpg' ? 'jpeg' : match[1];
+  const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+  return {
+    dataUri: record.base64,
+    rawBase64: match[2],
+    mimeType,
+    extension: format === 'jpeg' ? 'jpeg' : 'png',
+    capturedAt: record.capturedAt,
+  };
+}
+
+function writeInlineScreenshotDataUri(
+  inlineScreenshot: NonNullable<
+    ReturnType<typeof parseInlineScreenshotDataUri>
+  >,
+  opts: {
+    screenshotsDir: string;
+    writtenFiles: Set<string>;
+  },
+): {
+  type: 'midscene_screenshot_ref';
+  id: string;
+  capturedAt: number;
+  mimeType: 'image/png' | 'image/jpeg';
+  storage: 'file';
+  path: string;
+} {
+  const id = createHash('sha1')
+    .update(inlineScreenshot.dataUri)
+    .digest('hex')
+    .slice(0, 16);
+  const fileName = `${id}.${inlineScreenshot.extension}`;
+  const relativePath = `./screenshots/${fileName}`;
+  const absolutePath = path.join(opts.screenshotsDir, fileName);
+
+  if (!opts.writtenFiles.has(fileName)) {
+    writeFileSync(
+      absolutePath,
+      Buffer.from(inlineScreenshot.rawBase64, 'base64'),
+    );
+    opts.writtenFiles.add(fileName);
+  }
+
+  return {
+    type: 'midscene_screenshot_ref',
+    id,
+    capturedAt: inlineScreenshot.capturedAt,
+    mimeType: inlineScreenshot.mimeType,
+    storage: 'file',
+    path: relativePath,
+  };
+}
+
 function externalizeScreenshotsInExecution(
   execution: IExecutionDump,
   opts: {
@@ -501,6 +572,19 @@ function externalizeScreenshotsInExecution(
     }
 
     if (typeof node !== 'object' || node === null) return;
+
+    const inlineScreenshot = parseInlineScreenshotDataUri(node);
+    if (inlineScreenshot) {
+      const fileRef = writeInlineScreenshotDataUri(inlineScreenshot, {
+        screenshotsDir: opts.screenshotsDir,
+        writtenFiles: opts.writtenFiles,
+      });
+      for (const key of Object.keys(node)) {
+        delete (node as Record<string, unknown>)[key];
+      }
+      Object.assign(node, fileRef);
+      return;
+    }
 
     const ref = normalizeScreenshotRef(node);
     if (ref) {

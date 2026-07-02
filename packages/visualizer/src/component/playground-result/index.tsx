@@ -5,6 +5,7 @@ import type React from 'react';
 import type {
   PlaygroundResult as PlaygroundResultType,
   ReportDownloadHandler,
+  ReportZipDownloadHandler,
   ServiceModeType,
 } from '../../types';
 import type { ReplayScriptsInfo } from '../../utils/replay-scripts';
@@ -28,6 +29,7 @@ interface PlaygroundResultProps {
   actionType?: string; // The action type that was executed
   canDownloadReport?: boolean;
   onDownloadReport?: ReportDownloadHandler;
+  onDownloadReportZip?: ReportZipDownloadHandler;
 }
 
 export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
@@ -45,6 +47,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
   actionType,
   canDownloadReport,
   onDownloadReport,
+  onDownloadReportZip,
 }) => {
   let resultWrapperClassName = 'result-wrapper';
   if (verticalMode) {
@@ -105,6 +108,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
                   canDownloadReport ?? serviceMode !== 'In-Browser'
                 }
                 onDownloadReport={onDownloadReport}
+                onDownloadReportZip={onDownloadReportZip}
               />
             </div>
           </div>
@@ -149,6 +153,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
                 canDownloadReport ?? serviceMode !== 'In-Browser'
               }
               onDownloadReport={onDownloadReport}
+              onDownloadReportZip={onDownloadReportZip}
             />
           </div>
         </div>
@@ -169,6 +174,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
         autoZoom={autoZoom}
         canDownloadReport={canDownloadReport ?? serviceMode !== 'In-Browser'}
         onDownloadReport={onDownloadReport}
+        onDownloadReportZip={onDownloadReportZip}
       />
     );
   } else if (
@@ -202,6 +208,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
                 canDownloadReport ?? serviceMode !== 'In-Browser'
               }
               onDownloadReport={onDownloadReport}
+              onDownloadReportZip={onDownloadReportZip}
             />
           </div>
         </div>
@@ -225,6 +232,7 @@ export const PlaygroundResultView: React.FC<PlaygroundResultProps> = ({
         autoZoom={autoZoom}
         canDownloadReport={canDownloadReport ?? serviceMode !== 'In-Browser'}
         onDownloadReport={onDownloadReport}
+        onDownloadReportZip={onDownloadReportZip}
       />
     );
   } else if (result?.result !== undefined) {

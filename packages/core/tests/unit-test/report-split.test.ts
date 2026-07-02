@@ -302,4 +302,48 @@ describe('splitReportHtmlByExecution', () => {
       existsSync(join(outputDir, 'screenshots', 'fallback-shot.png')),
     ).toBe(true);
   });
+
+  it('should externalize inline base64 screenshots from downloadable reports', () => {
+    const reportPath = join(tmpDir, 'download-report', 'index.html');
+    mkdirSync(join(tmpDir, 'download-report'), { recursive: true });
+
+    const screenshot = ScreenshotItem.create(fakeBase64(100), Date.now());
+    const dump = new ReportActionDump({
+      groupName: 'download-test',
+      groupDescription: 'download-test',
+      sdkVersion: '1.0.0-test',
+      modelBriefs: [],
+      executions: [createExecution('exec-download', screenshot)],
+    });
+
+    writeFileSync(
+      reportPath,
+      generateDumpScriptTag(dump.serializeWithInlineScreenshots(), {
+        'data-group-id': 'group-1',
+      }),
+      'utf-8',
+    );
+
+    const outputDir = join(tmpDir, 'download-output');
+    const result = splitReportHtmlByExecution({
+      htmlPath: reportPath,
+      outputDir,
+    });
+
+    expect(result.executionJsonFiles).toHaveLength(1);
+    expect(result.screenshotFiles).toHaveLength(1);
+
+    const splitDump = JSON.parse(
+      readFileSync(result.executionJsonFiles[0], 'utf-8'),
+    );
+    const uiContextRef = splitDump.executions[0].tasks[0].uiContext.screenshot;
+
+    expect(uiContextRef.storage).toBe('file');
+    expect(uiContextRef.path).toMatch(/^\.\/screenshots\/.+\.png$/);
+    expect(uiContextRef.base64).toBeUndefined();
+
+    for (const screenshotFile of result.screenshotFiles) {
+      expect(existsSync(screenshotFile)).toBe(true);
+    }
+  });
 });

@@ -22,11 +22,17 @@ import {
 import GlobalPerspectiveIcon from '../../icons/global-perspective.svg';
 import PlayerSettingIcon from '../../icons/player-setting.svg';
 import { type PlaybackSpeedType, useGlobalPreference } from '../../store/store';
-import type { ReportDownloadHandler } from '../../types';
+import type {
+  ReportDownloadHandler,
+  ReportZipDownloadHandler,
+} from '../../types';
 import { notifyError } from '../../utils';
 import type { AnimationScript } from '../../utils/replay-scripts';
 import { shouldRestartPlaybackFromBeginning } from './playback-controls';
-import { triggerReportDownload } from './report-download';
+import {
+  triggerReportDownload,
+  triggerReportZipDownload,
+} from './report-download';
 import { StepsTimeline } from './scenes/StepScene';
 import { exportBrandedVideo } from './scenes/export-branded-video';
 import { calculateFrameMap } from './scenes/frame-calculator';
@@ -69,6 +75,7 @@ export function Player(props?: {
   autoZoom?: boolean;
   canDownloadReport?: boolean;
   onDownloadReport?: ReportDownloadHandler;
+  onDownloadReportZip?: ReportZipDownloadHandler;
   onTaskChange?: (taskId: string | null) => void;
   /** Start playback automatically on mount. Defaults to true. */
   autoPlay?: boolean;
@@ -213,6 +220,21 @@ export function Player(props?: {
       notifyError(error, { title: 'Failed to download report' });
     }
   }, [props?.onDownloadReport, props?.reportFileContent]);
+
+  const handleDownloadReportZip = useCallback(async () => {
+    if (!props?.reportFileContent || !props?.onDownloadReportZip) {
+      return;
+    }
+
+    try {
+      await triggerReportZipDownload({
+        content: props.reportFileContent,
+        onDownloadReportZip: props.onDownloadReportZip,
+      });
+    } catch (error) {
+      notifyError(error, { title: 'Failed to download report zip' });
+    }
+  }, [props?.onDownloadReportZip, props?.reportFileContent]);
 
   const subtitle = useMemo(() => {
     if (!currentFrameState) return null;
@@ -378,6 +400,8 @@ export function Player(props?: {
 
   const reportFileContent = props?.reportFileContent ?? null;
   const canDownloadReport = props?.canDownloadReport !== false;
+  const canDownloadReportZip =
+    canDownloadReport && Boolean(props?.onDownloadReportZip);
 
   // If no scripts, fall back to a Download-report empty state when a report is
   // available (e.g. Stop was pressed before any task finished). Otherwise hide
@@ -396,6 +420,16 @@ export function Player(props?: {
             >
               Download report
             </Button>
+            {canDownloadReportZip ? (
+              <Button
+                icon={<DownloadOutlined />}
+                onClick={() => {
+                  void handleDownloadReportZip();
+                }}
+              >
+                Download zip
+              </Button>
+            ) : null}
           </div>
         </div>
       );
@@ -552,6 +586,18 @@ export function Player(props?: {
                     className="status-icon"
                     onClick={() => {
                       void handleDownloadReport();
+                    }}
+                  >
+                    <DownloadOutlined />
+                  </div>
+                </Tooltip>
+              ) : null}
+              {reportFileContent && canDownloadReportZip ? (
+                <Tooltip title="Download Report Zip">
+                  <div
+                    className="status-icon"
+                    onClick={() => {
+                      void handleDownloadReportZip();
                     }}
                   >
                     <DownloadOutlined />

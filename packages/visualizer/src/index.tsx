@@ -78,6 +78,7 @@ export type {
   PromptInputChromeConfig,
   ReportDownloadHandler,
   ReportDownloadRequest,
+  ReportZipDownloadHandler,
 } from './types';
 
 // Export storage providers (both legacy and new)

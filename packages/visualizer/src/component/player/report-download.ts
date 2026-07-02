@@ -1,6 +1,10 @@
-import type { ReportDownloadHandler } from '../../types';
+import type {
+  ReportDownloadHandler,
+  ReportZipDownloadHandler,
+} from '../../types';
 
 export const DEFAULT_REPORT_FILE_NAME = 'midscene_report.html';
+export const DEFAULT_REPORT_ZIP_FILE_NAME = 'midscene_report_split.zip';
 
 interface AnchorLike {
   href: string;
@@ -32,6 +36,12 @@ interface TriggerReportDownloadOptions {
   urlRef?: UrlLike;
   blobFactory?: (parts: BlobPart[], options: BlobPropertyBag) => Blob;
   scheduleRevoke?: (callback: () => void) => void;
+}
+
+interface TriggerReportZipDownloadOptions {
+  content: string;
+  defaultFileName?: string;
+  onDownloadReportZip?: ReportZipDownloadHandler;
 }
 
 export async function triggerReportDownload(
@@ -88,4 +98,23 @@ export async function triggerReportDownload(
       activeUrl.revokeObjectURL(url);
     });
   }
+}
+
+export async function triggerReportZipDownload(
+  options: TriggerReportZipDownloadOptions,
+): Promise<void> {
+  const {
+    content,
+    defaultFileName = DEFAULT_REPORT_ZIP_FILE_NAME,
+    onDownloadReportZip,
+  } = options;
+
+  if (!onDownloadReportZip) {
+    throw new Error('Report zip download requires a download handler.');
+  }
+
+  await onDownloadReportZip({
+    content,
+    defaultFileName,
+  });
 }

@@ -410,6 +410,10 @@ export type ReportDownloadHandler = (
   request: ReportDownloadRequest,
 ) => void | Promise<void>;
 
+export type ReportZipDownloadHandler = (
+  request: ReportDownloadRequest,
+) => void | Promise<void>;
+
 // main component config interface
 export interface UniversalPlaygroundConfig {
   showContextPreview?: boolean;
@@ -459,6 +463,11 @@ export interface UniversalPlaygroundConfig {
    * Defaults to the browser Blob download flow when omitted.
    */
   onDownloadReport?: ReportDownloadHandler;
+  /**
+   * Optional host-provided split report zip download hook.
+   * When omitted, the zip download button is hidden.
+   */
+  onDownloadReportZip?: ReportZipDownloadHandler;
 }
 
 export interface ExecutionFlowConfig {

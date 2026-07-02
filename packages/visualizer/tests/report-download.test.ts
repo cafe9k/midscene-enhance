@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_REPORT_FILE_NAME,
+  DEFAULT_REPORT_ZIP_FILE_NAME,
   triggerReportDownload,
+  triggerReportZipDownload,
 } from '../src/component/player/report-download';
 
 describe('triggerReportDownload', () => {
@@ -59,5 +61,29 @@ describe('triggerReportDownload', () => {
     expect(anchor.click).toHaveBeenCalledTimes(1);
     expect(documentRef.body.removeChild).toHaveBeenCalledWith(anchor);
     expect(urlRef.revokeObjectURL).toHaveBeenCalledWith('blob:report');
+  });
+});
+
+describe('triggerReportZipDownload', () => {
+  it('delegates split zip downloads to the host-provided handler', async () => {
+    const onDownloadReportZip = vi.fn().mockResolvedValue(undefined);
+
+    await triggerReportZipDownload({
+      content: '<html>report</html>',
+      onDownloadReportZip,
+    });
+
+    expect(onDownloadReportZip).toHaveBeenCalledWith({
+      content: '<html>report</html>',
+      defaultFileName: DEFAULT_REPORT_ZIP_FILE_NAME,
+    });
+  });
+
+  it('throws when no split zip download handler is provided', async () => {
+    await expect(
+      triggerReportZipDownload({
+        content: '<html>report</html>',
+      }),
+    ).rejects.toThrow('Report zip download requires a download handler.');
   });
 });

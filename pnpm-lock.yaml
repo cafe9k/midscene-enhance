@@ -1184,6 +1184,9 @@ importers:
       express:
         specifier: ^4.21.2
         version: 4.21.2
+      fflate:
+        specifier: 0.8.2
+        version: 0.8.2
       open:
         specifier: 10.1.0
         version: 10.1.0

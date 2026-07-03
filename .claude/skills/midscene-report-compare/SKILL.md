@@ -105,9 +105,63 @@ Use the model to answer:
    - Screenshot/context misinterpretation?
 4. What is the root cause and suggested fix?
 
-### 5. Output the result
+### 5. Generate the static HTML report
 
-Format the answer as:
+The final deliverable should be a self-contained static HTML report saved inside the compare directory, for example:
+
+```
+<compare-dir>/report-compare.html
+```
+
+If the user provided explicit report directories instead of a shared compare directory, save the HTML to the nearest common parent directory, or to the current working directory as `midscene-report-compare.html`.
+
+The HTML report must be usable by opening it directly in a browser. Do not require a dev server. Use relative paths to screenshots whenever possible so the report remains portable with the compare directory. Do not inline large base64 screenshots unless the user explicitly asks for a single-file artifact.
+
+The report must present conclusions together with the evidence that supports each conclusion. Use this structure:
+
+1. **Executive Summary**
+   - One-line verdict: planning drift, action-effect drift, locate/bbox issue, stale cache, data-integrity issue, inconclusive, etc.
+   - Confidence level and the reason for that confidence
+2. **Data Integrity**
+   - Success/failure JSON paths
+   - Screenshot directory paths
+   - Missing screenshot references, if any
+   - Whether labels are trusted or inferred
+3. **Metrics Comparison**
+   - Planning loops, total tasks, failed tasks, running tasks, cache hits, locate count, action count
+4. **First Divergence**
+   - The first semantically meaningful divergence, aligned by workflow stage rather than raw task index
+   - Success thought/action/result
+   - Failure thought/action/result
+5. **Conclusion Cards**
+   - Each conclusion should be a card with:
+     - `Claim`: the concrete finding
+     - `Why it matters`: impact on the run
+     - `Evidence`: links/anchors to screenshots and log snippets
+     - `Suggested fix`: concrete recommendation
+6. **Evidence Timeline**
+   - Side-by-side success/failure steps
+   - For each important step, show:
+     - task index and task id
+     - type/subType/status
+     - thought/log/action params
+     - bbox/center when present
+     - before/after screenshots when present
+7. **Raw Evidence Appendix**
+   - Compact JSON/log snippets used by the analysis, not the full raw report
+
+Recommended HTML layout:
+
+- A sticky top summary bar with verdict, confidence, and report paths
+- A metrics table
+- A two-column comparison timeline for success vs failure
+- Screenshot thumbnails that can be clicked/opened at full size
+- Badges for task status, `hitBy.from`, action type, and risk category
+- A highlighted "First divergence" section before the full timeline
+
+The assistant's chat response should briefly summarize the result and point to the generated HTML path.
+
+Also include a concise markdown summary in the chat:
 
 ```markdown
 ## Summary
@@ -137,15 +191,21 @@ Format the answer as:
 
 - success: `screenshots/xxx.png` — ...
 - failure: `screenshots/yyy.png` — ...
+
+## HTML Report
+
+- Generated: `<compare-dir>/report-compare.html`
 ```
 
 ## Checklist
 
 - [ ] Confirmed both split-report directories and `*.execution.json` exist
 - [ ] Verified `screenshots/` directories are present
+- [ ] Verified screenshot references resolve to existing files
 - [ ] Extracted planning loops, action sequences, and errors from both reports
 - [ ] Identified the first meaningful divergence between success and failure
-- [ ] Included relevant screenshots in the analysis
+- [ ] Generated a static HTML report with conclusions linked to evidence
+- [ ] Included relevant screenshots and log snippets in the HTML report
 - [ ] Gave a concrete root-cause diagnosis and recommendation
 
 ## Tips

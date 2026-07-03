@@ -1,0 +1,21 @@
+.claude/skills/midscene-report-compare/SKILL.md
+  s_d2d2b911544ebd::t_3d74986062fc16 82-85,213,216
+  s_d2d2b911544ebd::t_f93815a9e91c22 123-124,127-128,131-144,148-149,151-162,164-167,171,176-178,191-194,196,198-199
+  s_d2d2b911544ebd::t_d88493565179ea 129-130,145-147,150,163,172-173,187,214-215,217-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.29-trip",
+  "base_commit_sha": "c22963874b79661e4950732f18a93b5c5f5a4e32",
+  "prompts": {},
+  "sessions": {
+    "s_d2d2b911544ebd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f25c5-1472-7ee2-891d-09569d01a9dc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "qingqing.zhang <qingqing.zhang@trip.com>"
+    }
+  }
+}

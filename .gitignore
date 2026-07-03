@@ -127,8 +127,6 @@ packages/playground/static/
 /apps/studio/.release/
 /.release/
 .cursor
-.claude
-**/.claude
 **/.agents
 **/CLAUDE.md
 **/AGENTS.md

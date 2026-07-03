@@ -79,7 +79,10 @@ Extract:
 
 When comparing `Locate` and input/tap tasks, always extract both logical bbox (`param.bbox`) and pixel bbox/center (`param.locatedPixelBbox`, `param.locate.center`) because visual coordinate mismatch is a common root cause.
 
-When a report JSON references screenshots that are not present next to the JSON, include a "Data Integrity" note in the output. Visual conclusions should be marked lower-confidence until the screenshot directory alignment is fixed.
+When a report JSON references screenshots that are not present next to the
+JSON, record that in the bottom **Data And Key Metrics** section. Visual
+conclusions should be marked lower-confidence until the screenshot directory
+alignment is fixed.
 
 ### 3. Build the comparison prompt
 
@@ -117,47 +120,62 @@ If the user provided explicit report directories instead of a shared compare dir
 
 The HTML report must be usable by opening it directly in a browser. Do not require a dev server. Use relative paths to screenshots whenever possible so the report remains portable with the compare directory. Do not inline large base64 screenshots unless the user explicitly asks for a single-file artifact.
 
-The report must present conclusions together with the evidence that supports each conclusion. Use this structure:
+The report must be concise and root-cause first. Use this structure in this
+exact order:
 
 1. **Executive Summary**
-   - One-line verdict: planning drift, action-effect drift, locate/bbox issue, stale cache, data-integrity issue, inconclusive, etc.
-   - Confidence level and the reason for that confidence
-2. **Data Integrity**
-   - Success/failure JSON paths
-   - Screenshot directory paths
-   - Missing screenshot references, if any
-   - Whether labels are trusted or inferred
-3. **Metrics Comparison**
-   - Planning loops, total tasks, failed tasks, running tasks, cache hits, locate count, action count
-4. **First Divergence**
-   - The first semantically meaningful divergence, aligned by workflow stage rather than raw task index
-   - Success thought/action/result
-   - Failure thought/action/result
-5. **Conclusion Cards**
-   - Each conclusion should be a card with:
-     - `Claim`: the concrete finding
-     - `Why it matters`: impact on the run
-     - `Evidence`: links/anchors to screenshots and log snippets
-     - `Suggested fix`: concrete recommendation
-6. **Evidence Timeline**
-   - Side-by-side success/failure steps
-   - For each important step, show:
-     - task index and task id
-     - type/subType/status
-     - thought/log/action params
-     - bbox/center when present
-     - before/after screenshots when present
-7. **Raw Evidence Appendix**
-   - Compact JSON/log snippets used by the analysis, not the full raw report
+   - Put the root-cause diagnosis first, visually emphasized in a highlighted
+     block.
+   - Keep the root-cause diagnosis within 50 Chinese characters. Put supporting
+     details in secondary bullets after the highlighted block.
+   - State the concrete failed behavior and why it happened, not just the final
+     failed assertion.
+   - Put secondary context after the root cause: labels such as planning drift,
+     replanning limit, missing screenshots, confidence level, and the fact that
+     the data was converted from HTML.
+2. **First Divergence**
+   - Start with the original step content/instruction being compared.
+   - Focus only on the first semantically meaningful divergence and what each
+     side did after that point.
+   - Use a compact table with rows like:
+     - `Divergence point`: success target/action vs failure target/action
+     - `After divergence`: how the success path progressed vs how the failure
+       path drifted
+     - `Final result`: success completion vs failure/error
+   - Include only compact evidence snippets that directly support this first
+     divergence, such as short action sequences and exact error/replanning
+     messages. Do not create a separate evidence appendix.
+   - Remove setup/background rows such as app install, page load, or earlier
+     matching checks unless they are the divergence.
+3. **Data And Key Metrics**
+   - Put this section at the end of the page, not near the top.
+   - Merge data integrity and metrics into one table.
+   - Include only important fields: source HTML/JSON paths, conversion
+     directories, parsed dump count, execution count, total tasks, planning
+     tasks, action tasks, failed tasks, dominant action types, and missing
+     screenshots.
+   - Use this as supporting evidence, not as the lead narrative.
+
+Do not include these sections in the default report:
+
+- `Execution Alignment Table`
+- `Conclusion Cards`
+- `Raw Evidence Appendix`
+- `Evidence Timeline` / `Key Evidence Timeline`
+
+If alignment information is useful, fold the single divergent execution into
+the **First Divergence** section instead of adding a full alignment table.
 
 Recommended HTML layout:
 
-- A sticky top summary bar with verdict, confidence, and report paths
-- A metrics table
-- A two-column comparison timeline for success vs failure
+- A sticky top summary bar with verdict and confidence
+- A highlighted root-cause block in the executive summary, limited to 50 Chinese
+  characters
 - Screenshot thumbnails that can be clicked/opened at full size
 - Badges for task status, `hitBy.from`, action type, and risk category
-- A highlighted "First divergence" section before the full timeline
+- A highlighted "First divergence" section immediately after the executive
+  summary
+- The merged data/key-metrics table at the bottom of the page
 
 The assistant's chat response should briefly summarize the result and point to the generated HTML path.
 
@@ -166,31 +184,19 @@ Also include a concise markdown summary in the chat:
 ```markdown
 ## Summary
 
-| Metric | Success | Failure | Note |
-|---|---|---|---|
-| Planning loops | N | M | ... |
-| Total tasks | N | M | ... |
-| Failed tasks | 0 | N | ... |
-| Cache hits | N | M | ... |
+Root cause: ... (50 Chinese characters max)
 
 ## First Divergence Point
 
-- Step: ...
-- Success thought/action: ...
-- Failure thought/action: ...
+- Original step: ...
+- Divergence point: ...
+- Success after divergence: ...
+- Failure after divergence: ...
 
-## Root Cause
+## Data Notes
 
-...
-
-## Recommended Fix
-
-...
-
-## Screenshot Evidence
-
-- success: `screenshots/xxx.png` — ...
-- failure: `screenshots/yyy.png` — ...
+- Converted output: ...
+- Screenshot completeness: ...
 
 ## HTML Report
 
@@ -204,8 +210,12 @@ Also include a concise markdown summary in the chat:
 - [ ] Verified screenshot references resolve to existing files
 - [ ] Extracted planning loops, action sequences, and errors from both reports
 - [ ] Identified the first meaningful divergence between success and failure
-- [ ] Generated a static HTML report with conclusions linked to evidence
-- [ ] Included relevant screenshots and log snippets in the HTML report
+- [ ] Generated a static HTML report in the required root-cause-first structure
+- [ ] Kept the root-cause diagnosis within 50 Chinese characters
+- [ ] Folded compact evidence snippets into First Divergence when useful
+- [ ] Moved the merged data/key-metrics table to the end of the report
+- [ ] Avoided Execution Alignment Table, Conclusion Cards, Raw Evidence Appendix,
+      and Evidence Timeline
 - [ ] Gave a concrete root-cause diagnosis and recommendation
 
 ## Tips

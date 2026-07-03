@@ -1,0 +1,24 @@
+packages/playground/tests/unit/server-split-report.test.ts
+  s_d2d2b911544ebd::t_9148625d43ceaa 3,57-59,63,103-112,122
+  s_d2d2b911544ebd::t_7f9da9ed6edafc 60-62,113-121
+packages/playground/src/server.ts
+  s_d2d2b911544ebd::t_0e457b91355136 83-84
+  s_d2d2b911544ebd::t_5a929101df0443 2313-2316,2318
+  s_d2d2b911544ebd::t_1f5f5d39ec834f 2493-2525
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.29-trip",
+  "base_commit_sha": "8f574eabc4ba529b377be2cd237a1d6e5d8b3388",
+  "prompts": {},
+  "sessions": {
+    "s_d2d2b911544ebd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f25c5-1472-7ee2-891d-09569d01a9dc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "qingqing.zhang <qingqing.zhang@trip.com>"
+    }
+  }
+}

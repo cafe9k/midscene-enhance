@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { splitReportFile } from '@midscene/core';
+import express from 'express';
 import { zipSync } from 'fflate';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { PlaygroundServer } from '../../src/server';
@@ -53,8 +54,13 @@ function getRouteHandler(
   method: 'get' | 'post',
   route: string,
 ) {
-  const calls = (server.app[method] as any).mock.calls as Array<[string, any]>;
-  return calls.find(([registeredRoute]) => registeredRoute === route)?.[1];
+  const calls = (server.app[method] as any).mock.calls as Array<
+    [string, ...any[]]
+  >;
+  const routeCall = calls.find(
+    ([registeredRoute]) => registeredRoute === route,
+  );
+  return routeCall?.at(-1);
 }
 
 describe('PlaygroundServer split report download', () => {
@@ -92,6 +98,28 @@ describe('PlaygroundServer split report download', () => {
         outputDir: expect.stringContaining('split'),
       }),
     );
+  });
+
+  test('POST /report/split-zip uses a dedicated larger JSON body limit before the global parser', async () => {
+    const server = new PlaygroundServer({} as any);
+    await server.launch(6110);
+
+    expect(express.json).toHaveBeenNthCalledWith(1, { limit: '200mb' });
+    expect(express.json).toHaveBeenNthCalledWith(2, { limit: '50mb' });
+
+    const postCalls = (server.app.post as any).mock.calls as Array<
+      [string, ...any[]]
+    >;
+    const useCallsBeforeSplitRoute = (
+      server.app.use as any
+    ).mock.invocationCallOrder.filter(
+      (order: number) =>
+        order <
+        (server.app.post as any).mock.invocationCallOrder[
+          postCalls.findIndex(([route]) => route === '/report/split-zip')
+        ],
+    );
+    expect(useCallsBeforeSplitRoute).toHaveLength(0);
   });
 
   test('POST /report/split-zip returns 400 when reportHTML is missing', async () => {

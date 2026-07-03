@@ -80,6 +80,8 @@ import type { AgentFactory } from './types';
 import 'dotenv/config';
 
 const defaultPort = PLAYGROUND_SERVER_PORT;
+const PLAYGROUND_JSON_BODY_LIMIT = '50mb';
+const REPORT_SPLIT_JSON_BODY_LIMIT = '200mb';
 const RECORDER_CAPTURE_AFTER_INTERACT_DELAY_MS = 250;
 const RECORDER_AI_DESCRIBE_AFTER_INTERACT_TIMEOUT_MS = 30_000;
 const RECORDER_AI_DESCRIBE_SCREENSHOT_DUMP_DIR =
@@ -2308,8 +2310,12 @@ class PlaygroundServer {
   private initializeApp(): void {
     if (this._initialized) return;
 
+    // Split reports can include many inline screenshots, so keep the larger
+    // body allowance scoped to this download endpoint.
+    this.setupReportSplitZipRoute();
+
     // Built-in middleware to parse JSON bodies
-    this._app.use(express.json({ limit: '50mb' }));
+    this._app.use(express.json({ limit: PLAYGROUND_JSON_BODY_LIMIT }));
 
     // Context update middleware (after JSON parsing)
     this._app.use(
@@ -2484,6 +2490,39 @@ class PlaygroundServer {
   /**
    * Setup all API routes
    */
+  private setupReportSplitZipRoute(): void {
+    this._app.post(
+      '/report/split-zip',
+      express.json({ limit: REPORT_SPLIT_JSON_BODY_LIMIT }),
+      async (req: Request, res: Response) => {
+        const { reportHTML } = req.body || {};
+
+        if (typeof reportHTML !== 'string' || !reportHTML) {
+          return res.status(400).json({
+            error: 'reportHTML is required and must be a string',
+          });
+        }
+
+        try {
+          const zipBuffer = createSplitReportZip(reportHTML);
+          res.setHeader('Content-Type', 'application/zip');
+          res.setHeader(
+            'Content-Disposition',
+            'attachment; filename="midscene_report_split.zip"',
+          );
+          res.send(zipBuffer);
+        } catch (error: unknown) {
+          const errorMessage =
+            error instanceof Error ? error.message : 'Unknown error';
+          console.error('Failed to generate split report zip:', errorMessage);
+          res.status(500).json({
+            error: `Failed to generate split report zip: ${errorMessage}`,
+          });
+        }
+      },
+    );
+  }
+
   private setupRoutes(): void {
     this._app.get('/status', async (req: Request, res: Response) => {
       res.send({
@@ -2912,33 +2951,6 @@ class PlaygroundServer {
         if (this.currentTaskId === requestId) {
           this.currentTaskId = null;
         }
-      }
-    });
-
-    this._app.post('/report/split-zip', async (req: Request, res: Response) => {
-      const { reportHTML } = req.body || {};
-
-      if (typeof reportHTML !== 'string' || !reportHTML) {
-        return res.status(400).json({
-          error: 'reportHTML is required and must be a string',
-        });
-      }
-
-      try {
-        const zipBuffer = createSplitReportZip(reportHTML);
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader(
-          'Content-Disposition',
-          'attachment; filename="midscene_report_split.zip"',
-        );
-        res.send(zipBuffer);
-      } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        console.error('Failed to generate split report zip:', errorMessage);
-        res.status(500).json({
-          error: `Failed to generate split report zip: ${errorMessage}`,
-        });
       }
     });
 
